@@ -48,4 +48,5 @@ Plotly
 statsmodels
 sqlalchemy
 tabulate
+XlsxWriter
 
