@@ -47,4 +47,5 @@ urllib3==2.5.0
 Plotly
 statsmodels
 sqlalchemy
+tabulate
 
