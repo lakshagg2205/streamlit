@@ -103,7 +103,7 @@ st.set_page_config(page_title="DataSense AI - Advanced Auto EDA", layout="wide")
 # IMPORTANT: Replace these with your actual API keys
 # MODIFIED: Changed the fake key to an empty string. The app will now correctly prompt you if the key is missing.
 GEMINI_API_KEY = "AIzaSyD21icfIXo9M8QUhYhq8kDuTbnDMvhN0Zc"  # Replace with your Gemini API key
-PPLX_API_KEY = "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" # Replace with your Perplexity API key
+PPLX_API_KEY = "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" # Replace with your Perplexity API key
 
 # Ollama specific constants
 OLLAMA_BASE_URL = "http://localhost:11434"
@@ -125,7 +125,10 @@ def init_session_state():
         'sandbox_conversation': [],
         'page': 'landing', # New state to manage navigation
         'dataset_summary': None, # To store AI-generated summary
-        'data_metrics': None # To store rows, cols, missing values info
+        'data_metrics': None, # To store rows, cols, missing values info
+        'sandbox_result_df': None, # To store the modified df from the sandbox
+        'custom_clean_code': "", # To store code from custom cleaning
+        'custom_clean_result_df': None, # To store result from custom cleaning
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -135,7 +138,7 @@ init_session_state()
 
 common_na_values = ["NA", "N/A", "", " ", "NULL", "null", "-", "?", "None", "nan", "NaN"]
 
-# --- All Helper Functions ---
+@st.cache_data
 def get_data_summary(df):
     summary_data = {}
     summary_data['shape_info'] = f"{df.shape[0]} rows, {df.shape[1]} columns"
@@ -161,6 +164,10 @@ def get_data_summary(df):
     summary_data['unique_values_df'] = pd.DataFrame(unique_values_data)
     return summary_data
 
+# --- All Helper Functions ---
+
+
+@st.cache_data
 def generate_ai_insights(df):
     insights = []
     missing = df.isnull().sum()
@@ -208,7 +215,7 @@ def generate_ai_insights(df):
         insights.append(f"⚠️ High cardinality: {', '.join(high_card_cols)}")
         insights.append("💡 Consider encoding or grouping.")
     return insights
-
+@st.cache_data(show_spinner=False)
 def perplexity_chat(question, df, prompt_type="all_rounder", system_message=None):
     if not PPLX_API_KEY or PPLX_API_KEY == "YOUR_PPLX_API_KEY":
         return "❌ Perplexity API Key is not set. Please replace 'YOUR_PPLX_API_KEY' with your actual key in the code."
@@ -309,6 +316,7 @@ Based on the provided context (either full data or summary), your job is to prov
     except Exception as e:
         return f"❌ An unexpected error occurred: {e}"
 
+@st.cache_data(show_spinner=False)
 def mistral_chat(question, context):
     prompt = (
         f"You are an expert data analyst with a deep understanding of datasets. "
@@ -337,6 +345,7 @@ def mistral_chat(question, context):
     except Exception as e:
         return f"An unexpected error occurred with Mistral: {e}"
 
+@st.cache_data(show_spinner=False)
 def ollama_generic_chat(question, context, model, system_message=None):
     if not LANGCHAIN_AVAILABLE:
         return "❌ LangChain is not installed. Please install it to use Ollama AI features."
@@ -345,13 +354,24 @@ def ollama_generic_chat(question, context, model, system_message=None):
         messages = []
         if system_message:
             messages.append({"role": "system", "content": system_message})
-        user_content = f"Here is the dataset context:\n{context}\n\nQuestion: {question}"
-        messages.append({"role": "user", "content": user_content})
-        response = llm.invoke(messages)
+        # If context is provided, prepend it to the question for the user role.
+        if context:
+            user_content = f"Here is the dataset context:\n{context}\n\nQuestion: {question}"
+        else:
+            user_content = question # In some cases (like sandbox explanation), the prompt is self-contained.
+        
+        from langchain_core.messages import HumanMessage, SystemMessage
+        langchain_messages = []
+        if system_message:
+            langchain_messages.append(SystemMessage(content=system_message))
+        langchain_messages.append(HumanMessage(content=user_content))
+        
+        response = llm.invoke(langchain_messages)
         return response.content
     except Exception as e:
         return f"❌ Error querying '{model}' via Ollama: {e}. Please ensure the model is downloaded (`ollama pull {model}`) and Ollama server is running at {OLLAMA_BASE_URL}."
 
+@st.cache_data(show_spinner=False)
 def llama3_chat(question, context):
     prompt = f"Dataset context:\n{context}\n\nQuestion: {question}\nAnswer:"
     try:
@@ -371,11 +391,12 @@ def llama3_chat(question, context):
 
 
 # MODIFIED: This function has been updated to correctly check for a missing API key.
+@st.cache_data(show_spinner=False)
 def chat_bot(messages, generation_config=None):
     API_KEY = GEMINI_API_KEY
-    if not API_KEY:
-        return "❌ Google Gemini API Key is not set. Please replace 'YOUR_GOOGLE_CLOUD_API_KEY' with your actual key in the code."
-    API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={API_KEY}"
+    if not API_KEY or API_KEY == "YOUR_GOOGLE_CLOUD_API_KEY":
+        return "❌ Google Gemini API Key is not set. Please add it to the script to use this feature."
+    API_URL = f"https://generativelanguage.googleapis.com/v1alpha/models/gemini-1.5-flash:generateContent?key={API_KEY}"
     gemini_chat_history = []
     system_instruction = ""
     for msg in messages:
@@ -386,6 +407,7 @@ def chat_bot(messages, generation_config=None):
         elif msg["role"] == "assistant":
             gemini_chat_history.append({"role": "model", "parts": [{"text": msg["content"]}]})
     if system_instruction and gemini_chat_history and gemini_chat_history[0]["role"] == "user":
+        # Prepend system instruction to the first user message
         gemini_chat_history[0]["parts"][0]["text"] = system_instruction + "\n\n" + gemini_chat_history[0]["parts"][0]["text"]
     payload = {
         "contents": gemini_chat_history,
@@ -395,7 +417,7 @@ def chat_bot(messages, generation_config=None):
     }
     headers = {"Content-Type": "application/json"}
     try:
-        response = requests.post(API_URL, headers=headers, json=payload)
+        response = requests.post(API_URL, headers=headers, json=payload, timeout=120)
         response.raise_for_status()
         result = response.json()
         if result.get("candidates") and len(result["candidates"]) > 0 and \
@@ -526,6 +548,7 @@ def generate_python_for_sandbox(query, df, correction_context=None):
             "You are an expert Python debugger and data analyst. The user's previous code attempt failed. "
             "Your task is to analyze the user's original goal, the faulty code, and the resulting error message. "
             "You MUST rewrite the code to fix the error and achieve the original goal. "
+            "The final script should reassign the transformed dataframe back to the `df` variable if modifications are made. "
             "Output ONLY the corrected, complete Python code. Do not include any explanations, introductory text, or markdown code fences like ```python."
         )
         code_gen_user_prompt = (
@@ -547,7 +570,8 @@ def generate_python_for_sandbox(query, df, correction_context=None):
         code_gen_system_prompt = (
             "You are an expert Python data analyst. Your task is to write a Python script to answer a user's question about a pandas DataFrame. "
             "The DataFrame is available in the variable `df`. "
-            "The script must perform the necessary analysis and print the final result to standard output using the `print()` function. "
+            "The script must perform the necessary analysis. If the task involves modifying the dataframe (e.g., cleaning, filtering, transforming), the script must assign the modified dataframe back to the `df` variable. "
+            "The script should print the final result to standard output using the `print()` function for analysis tasks. "
             "The output should be a clear, concise answer to the user's question (e.g., a number, a list of items, a small table, or a descriptive sentence). "
             "Do NOT include any example usage or explanations, just the pure Python code. "
             "Ensure the code is self-contained and relies only on standard libraries like pandas and numpy, which are already imported and available as `pd` and `np`. "
@@ -573,6 +597,7 @@ def generate_python_for_sandbox_pplx(query, df, correction_context=None):
             "You are an expert Python debugger and data analyst. The user's previous code attempt failed. "
             "Your task is to analyze the user's original goal, the faulty code, and the resulting error message. "
             "You MUST rewrite the code to fix the error and achieve the original goal. "
+            "If the goal is to modify the data, ensure the final script reassigns the transformed dataframe back to the `df` variable. "
             "Based on the dataset context provided, output ONLY the corrected, complete Python code. Do not include any explanations or markdown."
         )
         user_question_for_pplx = (
@@ -586,7 +611,8 @@ def generate_python_for_sandbox_pplx(query, df, correction_context=None):
         system_message = (
             "You are an expert Python data analyst. Your task is to write a Python script to answer a user's question about a pandas DataFrame. "
             "The DataFrame is available in a variable named `df`. "
-            "The script MUST perform the necessary analysis and print the final result to standard output using the `print()` function. "
+            "If the task involves modifying the dataframe (e.g., cleaning, filtering, transforming), the script must assign the modified dataframe back to the `df` variable. "
+            "The script MUST perform the necessary analysis and print the final result to standard output using the `print()` function for analysis tasks. "
             "Your output must ONLY be the Python code. Do not include any explanations, introductory text, or markdown code fences like ```python. "
             "The code must be self-contained and rely only on pandas and numpy, which are available as `pd` and `np`. "
             "The DataFrame is named `df`."
@@ -610,6 +636,7 @@ def generate_python_for_sandbox_mistrallatest(query, df, correction_context=None
             "You are an expert Python debugger and data analyst. The user's previous code attempt failed. "
             "Your task is to analyze the user's original goal, the faulty code, and the resulting error message. "
             "You MUST rewrite the code to fix the error and achieve the original goal. "
+            "If the goal is to modify the data, ensure the final script reassigns the transformed dataframe back to the `df` variable. "
             "Output ONLY the corrected, complete Python code. Do not include any explanations or markdown."
         )
         user_question = (
@@ -622,7 +649,8 @@ def generate_python_for_sandbox_mistrallatest(query, df, correction_context=None
         system_message = (
             "You are an expert Python data analyst. Your task is to write a Python script to answer a user's question about a pandas DataFrame. "
             "The DataFrame is available in a variable named `df`. "
-            "The script MUST perform the necessary analysis and print the final result to standard output using the `print()` function. "
+            "If the task involves modifying the dataframe (e.g., cleaning, filtering, transforming), the script must assign the modified dataframe back to the `df` variable. "
+            "The script MUST perform the necessary analysis and print the final result to standard output using the `print()` function for analysis tasks. "
             "Your output must ONLY be the Python code. Do not include any explanations, introductory text, or markdown code fences like ```python. "
             "The code must be self-contained and rely only on pandas and numpy, which are available as `pd` and `np`. "
             "The DataFrame is named `df`."
@@ -646,42 +674,50 @@ def generate_python_for_sandbox_mistrallatest(query, df, correction_context=None
     generated_code = textwrap.dedent(generated_code).strip()
     return generated_code
 
+# MODIFICATION: This function now shows the AI's "thinking" process and returns the modified dataframe.
 def execute_and_explain_sandbox(query, generated_code, df, model_choice="Google Gemini"):
     """
-    Executes AI-generated Python code in a sandboxed environment.
+    Executes AI-generated Python code, showing the AI's "thinking" process.
     If the code fails, it asks the AI to correct it and retries once.
     Finally, it asks the AI to explain the result or the final error.
+    Returns the output, explanation, final code, and the modified dataframe.
     """
     MAX_RETRIES = 1
     current_code = generated_code
     code_output = ""
     final_explanation = ""
+    modified_df = df.copy() # Start with a copy
     
-    st_status_container = st.status(f"Executing AI-generated code for: '{query}'", expanded=True)
+    st_status_container = st.status(f"🤖 AI is thinking... Processing your request: '{query}'", expanded=True)
 
     with st_status_container:
         for attempt in range(MAX_RETRIES + 1):
             if attempt > 0:
-                st.info(f"An error occurred. Attempting to self-correct (Attempt {attempt}/{MAX_RETRIES})...")
+                st.info(f"An error occurred. AI is re-evaluating the approach... (Attempt {attempt}/{MAX_RETRIES})")
 
             old_stdout = sys.stdout
             redirected_output = io.StringIO()
             try:
-                st.write("▶️ **Attempting to execute the following code:**")
+                st.write("▶️ **Thinking Step: Attempting to execute the following code...**")
                 st.code(current_code, language="python")
                 
                 # Execute the code
                 compile(current_code, '<string>', 'exec')
                 sys.stdout = redirected_output
-                local_scope = {'df': df.copy(), 'pd': pd, 'np': np} # Use a copy of df
+                local_scope = {'df': modified_df.copy(), 'pd': pd, 'np': np} # Use a copy of df
                 exec(current_code, globals(), local_scope)
                 sys.stdout = old_stdout # Restore stdout
                 
+                modified_df = local_scope.get('df', modified_df) # Get the modified df
                 code_output = redirected_output.getvalue()
+
                 if not code_output:
-                    code_output = "The script ran successfully but produced no printed output."
-                
-                st.success("✅ Code executed successfully!")
+                    if not df.equals(modified_df):
+                         code_output = "The script ran successfully and modified the DataFrame. No printed output was generated."
+                    else:
+                         code_output = "The script ran successfully but produced no printed output and did not modify the DataFrame."
+
+                st.success("✅ **Thinking Step Complete:** Code executed successfully!")
                 break # Exit loop on success
             
             except Exception as e:
@@ -695,51 +731,53 @@ def execute_and_explain_sandbox(query, generated_code, df, model_choice="Google 
                     code_output = f"The code failed after {attempt + 1} attempts. Last error:\n{error_message}"
                     st_status_container.update(label="Code execution failed after multiple attempts.", state="error")
                     break
-
-                st.write(f"🤖 Asking AI ({model_choice}) to fix the code...")
-                correction_context = {'failed_code': current_code, 'error_message': error_message}
                 
+                st.write("🤖 **Thinking...** The previous code failed. I will now analyze the error message and the original goal to create a corrected version of the code.")
+                
+                correction_context = {'failed_code': current_code, 'error_message': error_message}
                 new_code = ""
-                if model_choice == "Perplexity AI":
+
+                if model_choice == "mistral:latest":
+                    st.info("Mistral's code failed. Asking Perplexity AI to provide a fix.")
                     new_code = generate_python_for_sandbox_pplx(query, df, correction_context=correction_context)
-                elif model_choice == "mistral:latest":
-                    new_code = generate_python_for_sandbox_mistrallatest(query, df, correction_context=correction_context)
+                elif model_choice == "Perplexity AI":
+                    st.write(f"🤖 Asking Perplexity AI to fix the code...")
+                    new_code = generate_python_for_sandbox_pplx(query, df, correction_context=correction_context)
                 else: # Google Gemini
+                    st.write(f"🤖 Asking Google Gemini to fix the code...")
                     new_code = generate_python_for_sandbox(query, df, correction_context=correction_context)
 
                 if not new_code or new_code.strip() == "" or new_code.startswith("❌"):
                     code_output = f"AI failed to correct the code. Last error:\n{error_message}"
                     st_status_container.update(label="AI failed to correct the code.", state="error")
                     break
-
-                # Clean the new code
+                
                 if new_code.strip().startswith("```python"):
                     new_code = new_code.strip()[9:].strip()
                 if new_code.endswith("```"):
                     new_code = new_code[:-3].strip()
-                new_code = new_code.strip().strip('"').strip("'")
                 new_code = textwrap.dedent(new_code).strip()
 
-                st.info("AI has provided a corrected version of the code.")
-                current_code = new_code # Update code for the next loop iteration
+                st.info("💡 **Thinking Step:** AI has provided a corrected version of the code.")
+                current_code = new_code
             
             finally:
                 sys.stdout = old_stdout
 
         # --- Explanation Generation ---
-        st.write("💬 Generating final explanation...")
+        st.write("🤖 **Thinking...** The code execution process is complete. I will now analyze the entire process to generate a final explanation of the outcome.")
+        
         explanation_system_prompt = ""
         explanation_user_prompt = ""
         
-        # Check if the last execution resulted in an error
         if "An error occurred" in code_output or "A syntax error was found" in code_output:
             explanation_system_prompt = (
-                "You are an expert Python debugger. You were asked to execute a script, but it failed even after a correction attempt. "
-                "You will be given the user's original request, the final code that failed, and the final error message. "
-                "Your task is to explain what went wrong in a clear, easy-to-understand way. Do not attempt to re-run the code. Just explain the error."
+                "You are an expert Python debugger. A script failed even after a correction attempt. "
+                "Analyze the user's request, the final failed code, and the error message. "
+                "Explain what went wrong in a clear, easy-to-understand way. Do not try to re-run the code. Just explain the error."
             )
             explanation_user_prompt = (
-                f"Here is the debugging context:\n\n"
+                f"**Debugging Context:**\n"
                 f"**Original Question:** {query}\n\n"
                 f"**Final Python Code that Failed:**\n```python\n{current_code}\n```\n\n"
                 f"**Final Error Message:**\n```\n{code_output}\n```\n\n"
@@ -748,14 +786,11 @@ def execute_and_explain_sandbox(query, generated_code, df, model_choice="Google 
             st_status_container.update(label="Execution failed. Generating error analysis.", state="error")
         else:
             explanation_system_prompt = (
-                "You are an expert data analyst and a helpful assistant. "
-                "Your role is to explain the results of a data analysis script to a user. "
-                "You will be given the user's original question, the Python code that was successfully executed, and the output from that code. "
-                "Your task is to provide a clear, easy-to-understand explanation of what the code did and what the output means in the context of the user's question. "
-                "Structure your response well. Start by summarizing the finding, then explain the methodology and the result."
+                "You are an expert data analyst. You will be given a user's question, the Python code that was successfully executed to answer it, and the code's output. "
+                "Your task is to provide a clear explanation of what the code did and what the output means in the context of the user's question. Also comment if the dataframe was changed."
             )
             explanation_user_prompt = (
-                f"Here is the analysis context:\n\n"
+                f"**Analysis Context:**\n\n"
                 f"**Original Question:** {query}\n\n"
                 f"**Python Code Executed:**\n```python\n{current_code}\n```\n\n"
                 f"**Output of the Code:**\n```\n{code_output}\n```\n\n"
@@ -763,27 +798,20 @@ def execute_and_explain_sandbox(query, generated_code, df, model_choice="Google 
             )
             st_status_container.update(label="Execution complete. Generating final analysis.", state="complete")
 
-        # Call the appropriate LLM for the final explanation
         if model_choice == "Google Gemini":
-            messages_for_explanation = [
-                {"role": "system", "content": explanation_system_prompt},
-                {"role": "user", "content": explanation_user_prompt}
-            ]
+            messages_for_explanation = [{"role": "system", "content": explanation_system_prompt}, {"role": "user", "content": explanation_user_prompt}]
             final_explanation = chat_bot(messages_for_explanation)
-        elif  model_choice == "Perplexity AI":
-            final_explanation = perplexity_chat(
-                question=explanation_user_prompt, df=pd.DataFrame(), system_message=explanation_system_prompt
-            )
-        
+        elif model_choice == "Perplexity AI":
+            final_explanation = perplexity_chat(question=explanation_user_prompt, df=pd.DataFrame(), system_message=explanation_system_prompt)
+        elif model_choice == "mistral:latest":
+            final_explanation = ollama_generic_chat(question=explanation_user_prompt, context="", model=OLLAMA_MISTRAL_MODEL, system_message=explanation_system_prompt)
             
-    return code_output, final_explanation, current_code
+    return code_output, final_explanation, current_code, modified_df
 
 # --- Data Analysis and Metrics Generation ---
-def analyze_and_store_data_details(df):
-    """Analyzes the dataframe and stores summary and metrics in session state."""
-    # 1. Generate AI summary
+def generate_and_store_ai_summary(df):
+    """Generates and stores only the AI summary in session state."""
     with st.spinner("Generating AI summary of the dataset..."):
-        # Using a default prompt for general dataset description
         summary_prompt = (
             "Based on the provided data summary (column names, types, sample data), "
             "provide a brief, high-level description of what this dataset is likely about. "
@@ -797,20 +825,21 @@ def analyze_and_store_data_details(df):
         )
         st.session_state.dataset_summary = summary
 
-    # 2. Calculate data metrics
+def calculate_and_store_data_metrics(df):
+    """Calculates basic metrics and stores them in session state."""
     rows, cols = df.shape
     missing_values = df.isnull().sum()
     cols_with_missing = missing_values[missing_values > 0]
     missing_info = []
     if not cols_with_missing.empty:
         for col, count in cols_with_missing.items():
-            percentage = (count / rows) * 100
+            percentage = (count / rows) * 100 if rows > 0 else 0
             missing_info.append({
                 "Column": col,
                 "Missing Count": count,
                 "Percentage": f"{percentage:.2f}%"
             })
-    
+
     st.session_state.data_metrics = {
         "rows": rows,
         "columns": cols,
@@ -881,6 +910,25 @@ st.markdown(f"""
 
 # --- Sidebar Controls ---
 st.sidebar.title("📊 Data Operations")
+
+# Caching functions for data loading
+@st.cache_data(show_spinner="Reading CSV...")
+def read_csv_cached(file):
+    return pd.read_csv(file, na_values=common_na_values)
+
+@st.cache_data(show_spinner="Reading Excel file...")
+def read_excel_cached(file_content, sheet_name=0):
+    df = pd.read_excel(file_content, sheet_name=sheet_name)
+    df.replace(common_na_values, np.nan, inplace=True)
+    return df
+
+@st.cache_resource(show_spinner="Creating database engine...")
+def create_engine_cached(conn_string):
+    return create_engine(conn_string)
+
+@st.cache_data(show_spinner="Fetching data from database...")
+def read_sql_cached(query, _engine):
+    return pd.read_sql(query, _engine)
 
 # 1. Load Data Expander
 with st.sidebar.expander("📂 Load Data", expanded=True):
@@ -1099,10 +1147,128 @@ with st.sidebar.expander("📂 Load Data", expanded=True):
 
 
 # 2. Link DataFrames Expander
+# MODIFICATION START: Implemented the merge functionality
 if len(st.session_state.get('uploaded_dfs', {})) > 1:
     with st.sidebar.expander("🔗 Link DataFrames", expanded=False):
-        st.info("Functionality to link or merge multiple DataFrames is coming soon.")
-        pass
+        df_names = list(st.session_state.uploaded_dfs.keys())
+        
+        left_df_name = st.selectbox("Select Left DataFrame", df_names, key="left_df_select")
+        right_df_name = st.selectbox("Select Right DataFrame", [name for name in df_names if name != left_df_name], key="right_df_select")
+
+        if left_df_name and right_df_name:
+            left_df = st.session_state.uploaded_dfs[left_df_name]
+            right_df = st.session_state.uploaded_dfs[right_df_name]
+            
+            merge_type = st.selectbox("Select Merge Type", ["inner", "outer", "left", "right"], key="merge_type")
+
+            common_columns = list(set(left_df.columns) & set(right_df.columns))
+            
+            left_on = st.multiselect("Select key(s) from Left DataFrame", left_df.columns.tolist(), default=common_columns, key="left_on_cols")
+            right_on = st.multiselect("Select key(s) from Right DataFrame", right_df.columns.tolist(), default=common_columns, key="right_on_cols")
+
+            if st.button("Merge DataFrames", key="merge_dfs_button"):
+                if not left_on or not right_on:
+                    st_error_dual("Please select at least one key column for both DataFrames.")
+                else:
+                    try:
+                        with st.spinner("Merging DataFrames..."):
+                            merged_df = pd.merge(
+                                left_df,
+                                right_df,
+                                how=merge_type,
+                                left_on=left_on,
+                                right_on=right_on
+                            )
+                            st.session_state['df_original'] = merged_df
+                            st.session_state['data_source'] = "merged_df"
+                            st.session_state['uploaded_dfs'] = {'merged_df': merged_df} # Replace uploaded dfs with the new merged one
+                            st_success_dual(f"DataFrames merged successfully! New shape: {merged_df.shape}")
+                            st.session_state.page = 'landing'
+                            # Reset analysis to force re-calculation on the new dataframe
+                            st.session_state.dataset_summary = None
+                            st.session_state.data_metrics = None
+                            st.rerun()
+
+                    except Exception as e:
+                        st_error_dual(f"Error merging DataFrames: {e}")
+# MODIFICATION END
+
+# MODIFICATION START: Added manual cleaning expander for missing values
+with st.sidebar.expander("🧹 Manual Cleaning", expanded=False):
+    if st.session_state.get('df_original') is not None:
+        df_for_cleaning = st.session_state['df_original']
+        
+        # Select column to clean
+        cols_with_missing = df_for_cleaning.columns[df_for_cleaning.isnull().any()].tolist()
+        if not cols_with_missing:
+            st.info("No columns with missing values found in the current dataset.")
+        else:
+            col_to_clean = st.selectbox(
+                "Select a column to clean:",
+                ["-"] + cols_with_missing,
+                key="col_to_clean_select"
+            )
+
+            if col_to_clean != "-":
+                # Display missing value info
+                missing_count = df_for_cleaning[col_to_clean].isnull().sum()
+                missing_percent = (missing_count / len(df_for_cleaning)) * 100
+                st.write(f"Missing values in **{col_to_clean}**: {missing_count} ({missing_percent:.2f}%)")
+                
+                # Choose cleaning action
+                action = st.radio(
+                    "Choose an action:",
+                    ["Impute Missing Values", "Drop Rows with Missing Values", "Drop Column"],
+                    key=f"clean_action_{col_to_clean}"
+                )
+
+                temp_df = st.session_state['df_original'].copy()
+
+                if action == "Impute Missing Values":
+                    is_numeric = pd.api.types.is_numeric_dtype(df_for_cleaning[col_to_clean])
+                    impute_options = []
+                    if is_numeric:
+                        impute_options.extend(["Mean", "Median"])
+                    impute_options.append("Mode")
+                    
+                    impute_method = st.selectbox("Select imputation method:", impute_options, key=f"impute_method_{col_to_clean}")
+
+                    if st.button(f"Apply Imputation to '{col_to_clean}'", key=f"apply_impute_{col_to_clean}"):
+                        if impute_method == "Mean":
+                            fill_value = temp_df[col_to_clean].mean()
+                            temp_df[col_to_clean].fillna(fill_value, inplace=True)
+                        elif impute_method == "Median":
+                            fill_value = temp_df[col_to_clean].median()
+                            temp_df[col_to_clean].fillna(fill_value, inplace=True)
+                        elif impute_method == "Mode":
+                            fill_value = temp_df[col_to_clean].mode()[0]
+                            temp_df[col_to_clean].fillna(fill_value, inplace=True)
+                        
+                        st.session_state['df_original'] = temp_df
+                        st_success_dual(f"Imputed missing values in '{col_to_clean}' with {impute_method.lower()}.")
+                        st.session_state.dataset_summary = None # Force re-analysis
+                        st.rerun()
+
+                elif action == "Drop Rows with Missing Values":
+                    if st.button(f"Apply Drop Rows for '{col_to_clean}'", key=f"apply_drop_rows_{col_to_clean}"):
+                        rows_before = len(temp_df)
+                        temp_df.dropna(subset=[col_to_clean], inplace=True)
+                        rows_after = len(temp_df)
+                        st.session_state['df_original'] = temp_df
+                        st_success_dual(f"Dropped {rows_before - rows_after} rows with missing values in '{col_to_clean}'.")
+                        st.session_state.dataset_summary = None # Force re-analysis
+                        st.rerun()
+
+                elif action == "Drop Column":
+                    if st.button(f"Apply Drop Column '{col_to_clean}'", key=f"apply_drop_col_{col_to_clean}", type="primary"):
+                        temp_df.drop(columns=[col_to_clean], inplace=True)
+                        st.session_state['df_original'] = temp_df
+                        st_success_dual(f"Dropped column '{col_to_clean}'.")
+                        st.session_state.dataset_summary = None # Force re-analysis
+                        st.rerun()
+    else:
+        st.warning("Please load data to use cleaning features.")
+# MODIFICATION END
 
 # 4. Data Filtering Expander
 with st.sidebar.expander("🔍 Filter Data", expanded=False):
@@ -1146,15 +1312,20 @@ if st.session_state.get('df_original') is not None:
                     df = df[(df[col] >= start_date) & (df[col] <= end_date)]
                 else:
                     df = df[df[col].isin(value)]
-if df is not None and st.session_state.get('dataset_summary') is None:
-    analyze_and_store_data_details(df)
-    # Rerun the script immediately after analysis to update the page
-    st.rerun()                    
+
+if df is not None:
+    # Calculate metrics on the potentially filtered df EVERY time. This is fast.
+    calculate_and_store_data_metrics(df)
+
+    # Only generate the expensive AI summary ONCE.
+    if st.session_state.get('dataset_summary') is None:
+        generate_and_store_ai_summary(df)
+        st.rerun()                 
 
 # --- Page Views ---
 
 def landing_page_view():
-    st.title("🚀 Welcome to DataSense AI")
+    st.title(" Welcome to DataSense AI 🚀")
     st.markdown("Your dataset has been loaded. Here's a quick overview:")
 
     if st.session_state.dataset_summary and st.session_state.data_metrics:
@@ -1187,15 +1358,15 @@ def landing_page_view():
                     st.rerun()
         with col2:
             with st.container():
-                st.markdown("""<div class="nav-box"><h3>📈 Visualisation Engine</h3><p>Create interactive charts and graphs to explore your data visually.</p></div>""", unsafe_allow_html=True)
-                if st.button("Launch Visualisation", key="nav_viz", use_container_width=True):
-                    st.session_state.page = 'visualisation'
-                    st.rerun()
-        with col3:
-            with st.container():
                 st.markdown("""<div class="nav-box"><h3>🧠 AI Analysis</h3><p>Ask questions, get cleaning suggestions, and use the AI sandbox.</p></div>""", unsafe_allow_html=True)
                 if st.button("Get AI Insights", key="nav_ai", use_container_width=True):
                     st.session_state.page = 'ai_analysis'
+                    st.rerun()
+        with col3:
+            with st.container():
+                st.markdown("""<div class="nav-box"><h3>📈 Visualisation Engine</h3><p>Create interactive charts and graphs to explore your data visually.</p></div>""", unsafe_allow_html=True)
+                if st.button("Launch Visualisation", key="nav_viz", use_container_width=True):
+                    st.session_state.page = 'visualisation'
                     st.rerun()
         with col4:
             with st.container():
@@ -1212,6 +1383,86 @@ def data_profile_view():
         st_dataframe_dual(df)
         st_markdown_dual("### Summary Statistics")
         summary_data = get_data_summary(df)
+
+        # MODIFICATION START: This version includes the critical state-resetting logic.
+        with st.expander("Change Column Data Type"):
+            df_for_conversion = st.session_state.get('df_original')
+
+            if df_for_conversion is not None:
+                all_cols = df_for_conversion.columns.tolist()
+                col_to_convert = st.selectbox(
+                    "Select a column to convert", 
+                    ["-"] + all_cols, 
+                    key="col_type_converter_select"
+                )
+
+                if col_to_convert != "-":
+                    st.write(f"Current data type of **{col_to_convert}** is `{df_for_conversion[col_to_convert].dtype}`")
+                    
+                    conversion_type = st.selectbox(
+                        "Convert to type:",
+                        ["-", "Numeric (Integer)", "Numeric (Float)", "Text/String (Object)", "Datetime", "Category", "Custom Map to Categorical"],
+                        key=f"convert_type_{col_to_convert}"
+                    )
+
+                    # --- This is the function that contains the definitive fix ---
+                    def apply_conversion_and_reset_state(temp_df):
+                        """Saves the converted dataframe and resets all dependent app states."""
+                        st.session_state['df_original'] = temp_df
+                        
+                        # CRITICAL FIX: Reset all states that depend on the old data types.
+                        st.session_state['active_filters'] = {}
+                        st.session_state['viz_filters'] = {}
+                        st.session_state['dataset_summary'] = None
+                        st.session_state['data_metrics'] = None
+                        
+                        st.success(f"Successfully converted '{col_to_convert}'.")
+                        st.warning("All filters and cached summaries have been reset to reflect the data change.")
+                        st.rerun()
+
+                    if conversion_type == "Custom Map to Categorical":
+                        st.info("Define a mapping from existing values to new categorical labels. Values not in the map will become 'Not a Number' (NaN).")
+                        unique_vals_to_map = df_for_conversion[col_to_convert].dropna().unique()
+
+                        if len(unique_vals_to_map) > 20:
+                            st.warning("Too many unique values (>20) for manual mapping.")
+                        else:
+                            map_dict = {}
+                            for val in unique_vals_to_map:
+                                map_dict[val] = st.text_input(f"Map '{val}' to:", key=f"map_{col_to_convert}_{val}")
+
+                            if st.button(f"Apply Custom Map to '{col_to_convert}'", key=f"apply_map_{col_to_convert}"):
+                                temp_df = st.session_state['df_original'].copy()
+                                final_map = {k: v for k, v in map_dict.items() if v}
+                                if not final_map:
+                                    st.error("Mapping cannot be empty.")
+                                else:
+                                    try:
+                                        temp_df[col_to_convert] = temp_df[col_to_convert].map(final_map).astype('category')
+                                        apply_conversion_and_reset_state(temp_df)
+                                    except Exception as e:
+                                        st.error(f"Failed to apply map: {e}")
+
+                    elif conversion_type != "-":
+                        if st.button(f"Apply Conversion to '{col_to_convert}'", key=f"apply_conversion_{col_to_convert}"):
+                            temp_df = st.session_state['df_original'].copy()
+                            try:
+                                if conversion_type == "Numeric (Integer)":
+                                    temp_df[col_to_convert] = pd.to_numeric(temp_df[col_to_convert], errors='coerce').astype('Int64')
+                                elif conversion_type == "Numeric (Float)":
+                                    temp_df[col_to_convert] = pd.to_numeric(temp_df[col_to_convert], errors='coerce').astype('float64')
+                                elif conversion_type == "Text/String (Object)":
+                                    temp_df[col_to_convert] = temp_df[col_to_convert].astype(str)
+                                elif conversion_type == "Datetime":
+                                    temp_df[col_to_convert] = pd.to_datetime(temp_df[col_to_convert], errors='coerce')
+                                elif conversion_type == "Category":
+                                    temp_df[col_to_convert] = temp_df[col_to_convert].astype('category')
+                                
+                                apply_conversion_and_reset_state(temp_df)
+                            except Exception as e:
+                                st.error(f"Conversion failed for '{col_to_convert}': {e}")
+        # MODIFICATION END
+
         with st.expander("Dataset Shape & Column Types", expanded=True):
             st_write_dual(summary_data['shape_info'])
             st_dataframe_dual(summary_data['column_types_df'], use_container_width=True)
@@ -1221,8 +1472,69 @@ def data_profile_view():
             st_dataframe_dual(summary_data['unique_values_df'], use_container_width=True)
         with st.expander("Numeric Summary"):
             st_dataframe_dual(df.describe().transpose(), use_container_width=True)
+        
+        with st.expander("Data Summary & AI-Powered Explanations", expanded=True):
+            if df is not None and not df.empty:
+                summary_data_for_ai = get_data_summary(df)
+                context_for_ai = f"Dataset Shape: {df.shape[0]} rows, {df.shape[1]} columns\n\n"
+                context_for_ai += "Column Types:\n"
+                context_for_ai += summary_data_for_ai['column_types_df'].to_markdown(index=False) + "\n\n"
+
+                if not summary_data_for_ai['missing_values_df'].empty:
+                    context_for_ai += "Missing Values (Columns with >0 missing):\n"
+                    context_for_ai += summary_data_for_ai['missing_values_df'].to_markdown(index=False) + "\n\n"
+                else:
+                    context_for_ai += "No missing values.\n\n"
+
+                context_for_ai += "Unique Values per Column:\n"
+                context_for_ai += summary_data_for_ai['unique_values_df'].to_markdown(index=False) + "\n\n"
+
+                numeric_desc_for_ai = df.select_dtypes(include=np.number).describe().transpose()
+                if not numeric_desc_for_ai.empty:
+                    context_for_ai += "Numeric Summary:\n"
+                    context_for_ai += numeric_desc_for_ai.to_markdown() + "\n\n"
+                else:
+                    context_for_ai += "No numeric columns to summarize.\n\n"
+                
+                insights = generate_ai_insights(df)
+
+                for i, insight in enumerate(insights):
+                    st.info(insight) 
+                    with st.expander("Why is this important? Click to ask AI..."):
+                        explanation_key = f"insight_explanation_{i}" 
+                        
+                        if explanation_key not in st.session_state:
+                            with st.spinner("🤖 Calling AI for a detailed explanation..."):
+                                system_prompt = (
+                                    "You are an expert data science instructor. A user is looking at an automated data quality insight. "
+                                    "Your task is to explain this insight in a clear, easy-to-understand manner. "
+                                    "Structure your response with markdown. Be concise but thorough."
+                                )
+                                user_prompt = (
+                                    f"My data analysis tool produced the following insight:\n\n"
+                                    f"**Insight:** \"{insight}\"\n\n"
+                                    f"**Here is a summary of my dataset for context:**\n"
+                                    f"```\n{context_for_ai}\n```\n\n"
+                                    f"Please explain this specific insight. In your explanation, cover these three points:\n"
+                                    f"1.  **What does this insight mean?** (e.g., Explain 'high cardinality' or 'data skewness').\n"
+                                    f"2.  **Why was this flagged for my specific data?** (Connect the concept to the column(s) mentioned in the insight).\n"
+                                    f"3.  **Why is the suggested action recommended?** (Explain what the proposed solution does and how it helps improve the data for analysis or modeling)."
+                                )
+                                messages = [
+                                    {"role": "system", "content": system_prompt},
+                                    {"role": "user", "content": user_prompt}
+                                ]
+                                explanation = chat_bot(messages)
+                                st.session_state[explanation_key] = explanation
+                        
+                        st.markdown(st.session_state[explanation_key])
+                    
+                    st.markdown("---") 
+            else:
+                st.warning("No data loaded to generate a summary.")
     else:
         st.warning("No data loaded.")
+
 
 def ask_ai_about_chart(chart_description, chart_title, df_context, key_suffix):
     """
@@ -1231,14 +1543,13 @@ def ask_ai_about_chart(chart_description, chart_title, df_context, key_suffix):
     st.markdown("---")
     st.markdown("#### 🤔 Ask AI about this Chart")
 
-    # Use session state to store the AI's response for this specific chart query
     session_key = f"viz_ai_response_{key_suffix}"
     if session_key not in st.session_state:
         st.session_state[session_key] = ""
 
     ai_model = st.radio(
         "Choose AI Model:",
-        ("Google Gemini", "Perplexity AI"),
+        ("Perplexity AI", "Google Gemini"),
         key=f"viz_ai_model_{key_suffix}",
         horizontal=True
     )
@@ -1251,7 +1562,6 @@ def ask_ai_about_chart(chart_description, chart_title, df_context, key_suffix):
     if st.button("Get AI Insight", key=f"viz_ai_submit_{key_suffix}"):
         if question:
             with st.spinner(f"Asking {ai_model} to analyze the '{chart_title}' chart..."):
-                # Construct a detailed prompt for the AI
                 system_prompt = (
                     "You are an expert data visualization analyst. "
                     "A user has generated a chart and is asking a question about it. "
@@ -1274,7 +1584,6 @@ def ask_ai_about_chart(chart_description, chart_title, df_context, key_suffix):
                     ]
                     response = chat_bot(messages)
                 elif ai_model == "Perplexity AI":
-                    # Perplexity chat function takes the full dataframe for context
                     response = perplexity_chat(question=user_prompt, df=df_context, system_message=system_prompt)
                 
                 st.session_state[session_key] = response
@@ -1301,6 +1610,15 @@ def visualisation_view():
         
         st.markdown("---")
         st.markdown("#### Apply Filters for Visualization (Visualization Specific Filters)")
+        
+        st.info("""
+        **Why use filters?**
+        Filtering allows you to focus on specific segments of your data. By narrowing down the data range or selecting specific categories, you can:
+        - **Isolate trends:** See patterns within a particular time period, group, or value range.
+        - **Reduce noise:** Remove irrelevant data points to make charts clearer and more insightful.
+        - **Compare subsets:** Analyze and compare different parts of your dataset side-by-side.
+        These filters apply only to the visualizations on this page and do not affect the main dataset.
+        """)
 
         df_for_viz_filter = df.copy()
         current_viz_available_columns = df_for_viz_filter.columns.tolist()
@@ -1632,17 +1950,14 @@ def visualisation_view():
         st_info_dual("Please upload data and ensure it's not empty after general filtering/cleaning to enable visualization.")
 
 
-# MODIFIED: This function has been restructured with st.columns to add a column selector on the right.
 def ai_analysis_view():
     st.subheader("🧠 AI Analysis")
 
-    # Create two columns: a main content area and a right sidebar for column selection
     main_col, side_col = st.columns([3, 1])
 
     with side_col:
         st.markdown("#### Select Columns to View")
         if df is not None and not df.empty:
-            # Use an expander for better layout
             with st.expander("Column Selector", expanded=True):
                 selected_cols = st.multiselect(
                     "Choose columns to display for reference:",
@@ -1658,7 +1973,6 @@ def ai_analysis_view():
         else:
             st.warning("No data loaded.")
 
-    # All AI tools will now be in the main (left) column
     with main_col:
         tab_titles = ["Q&A", "AI Cleaning Suggestions", "Custom AI Data Preparation", "AI Sandbox"]
         tab4_1, tab4_2, tab4_3, tab4_sandbox = st.tabs(tab_titles)
@@ -1667,16 +1981,22 @@ def ai_analysis_view():
             st.markdown("### ❓ Ask AI about your Data")
             st.info("This feature allows you to ask questions about your dataset in natural language. The AI will provide answers based on the data context.")
 
-            # --- MODIFICATION 1: Replaced st.radio with st.select_slider ---
-            model_options = ["Google Gemini (Internet Access)", "Perplexity AI (Internet Access)", "Mistral (Local llama)", "Llama 3.2 (Local llama)"]
+            model_options = ["Perplexity AI (Internet Access)", "Google Gemini (Internet Access)", "Mistral (Local llama)", "Llama 3.2 (Local llama)"]
             ai_model_choice = st.selectbox(
-                "Slide to choose your AI Model:",
+                "Choose your AI Model:",
                 options=model_options,
-                key="ai_model_slider"
+                key="ai_model_selector",
+                index=0 # Default to Perplexity AI
             )
-            st.markdown(f"**Selected Model:** `{ai_model_choice}`") # To make the selection clear
-
-            # --- MODIFICATION 2: Added a default prompt selector ---
+            st.markdown(f"**Selected Model:** `{ai_model_choice}`")
+            
+            answer_format = st.radio(
+                "Select your desired answer format:",
+                ("Detailed Explanation", "Main Bullet Points"),
+                key="answer_format_choice",
+                horizontal=True
+            )
+            
             default_prompts = [
                 "Write your own question...",
                 "Generate a 1 page detailed summary about the dataset",
@@ -1719,21 +2039,28 @@ def ai_analysis_view():
                         else:
                             st_warning_dual("No data loaded to ask questions about.")
                             
+                        if answer_format == "Main Bullet Points":
+                            format_instruction = "Please provide the answer in concise, main bullet points."
+                        else: # "Detailed Explanation"
+                            format_instruction = "Please provide a detailed and comprehensive answer."
+
+                        final_question = f"{user_question}\n\n{format_instruction}"
+
                         if ai_model_choice == "Google Gemini (Internet Access)":
                             messages = [
                                 {"role": "system", "content": "You are an expert data analyst. Provide insightful observations and answers based on the provided dataset context. Do NOT generate code."},
-                                {"role": "user", "content": f"Here is a summary of my dataset:\n{context_for_ai}\n\nMy question is: {user_question}"}
+                                {"role": "user", "content": f"Here is a summary of my dataset:\n{context_for_ai}\n\nMy question is: {final_question}"}
                             ]
                             gemini_response = chat_bot(messages)
                             st_write_dual(gemini_response)
                         elif ai_model_choice == "Perplexity AI (Internet Access)":
-                            pplx_response = perplexity_chat(user_question, df)
+                            pplx_response = perplexity_chat(final_question, df)
                             st_write_dual(pplx_response)
                         elif ai_model_choice == "Mistral (Local llama)":
-                            mistral_response = mistral_chat(user_question, context_for_ai)
+                            mistral_response = mistral_chat(final_question, context_for_ai)
                             st_write_dual(mistral_response)
                         elif ai_model_choice == "Llama 3.2 (Local llama)":
-                            llama_response = llama3_chat(user_question, context_for_ai)
+                            llama_response = llama3_chat(final_question, context_for_ai)
                             st_write_dual(llama_response)
                         
                 else:
@@ -1816,132 +2143,93 @@ def ai_analysis_view():
             else:
                 st_info_dual("Please upload data to get AI cleaning suggestions.")
         
+        # MODIFICATION START: Rewritten Custom AI Data Preparation section
         with tab4_3:
             st.markdown("### 🤖 Custom AI Data Preparation (Powered by Perplexity AI)")
-            st_info_dual("Provide instructions to the AI on how to clean and prepare your data. The AI will attempt to execute these instructions.")
-            if st.session_state['df_original'] is None or st.session_state['df_original'].empty:
-                st_info_dual("Please upload data to enable Custom AI Data Preparation.")
+            st.info("""
+            **How it works:**
+            1.  Write instructions in plain English on how you want to transform your data.
+            2.  Click "Generate Code" to have the AI write the Python code for the transformation.
+            3.  Review the generated code for accuracy and safety.
+            4.  Click "Execute" to run the code. The result will be shown below.
+            5.  If you're satisfied, click "Commit Changes" to make the transformation permanent for this session.
+            """)
+
+            if df is None or df.empty:
+                st.info("Please upload data to enable Custom AI Data Preparation.")
             else:
-                if st.session_state['processed_df_for_custom_clean'] is None or st.button("Initialize Data for Custom Cleaning", key="init_custom_clean_btn"):
-                    st.session_state['processed_df_for_custom_clean'] = st.session_state['df_original'].copy()
-                    st.session_state['llm_autoclean_log'] = []
-                    st_success_dual("Data initialized for custom cleaning. Provide your instructions below.")
-
-                st.markdown("---")
-                st.markdown("#### Current Data State for Custom Cleaning:")
-                st_write_dual(f"Shape: {st.session_state['processed_df_for_custom_clean'].shape[0]} rows, {st.session_state['processed_df_for_custom_clean'].shape[1]} columns")
-                st_dataframe_dual(st.session_state['processed_df_for_custom_clean'].head(5))
-                st.markdown("---")
-
-                user_cleaning_instruction_prompt = st.text_area(
-                    "Enter your data cleaning instructions (e.g., 'Impute missing values in column Age with the median', 'Drop the column named Notes if more than 80% values are missing', 'Convert TransactionDate to datetime format %Y-%m-%d', 'Normalize Income and Salary columns'):",
+                user_cleaning_instruction = st.text_area(
+                    "Enter your data cleaning instructions (e.g., 'Remove all rows where the 'age' column is less than 18', 'Create a new column 'age_group' based on the 'age' column', 'Replace all negative values in the 'sales' column with 0')",
                     height=150,
-                    key="user_cleaning_instruction_prompt"
+                    key="user_custom_cleaning_prompt"
                 )
-                if st.button("Run Custom Cleaning (Perplexity)", key="run_custom_clean_btn"):
-                    if user_cleaning_instruction_prompt:
-                        with st.spinner("Perplexity AI is processing your cleaning instructions..."):
-                            current_df = st.session_state['processed_df_for_custom_clean']
-                            custom_clean_context = f"Current Data Columns and Types:\n{current_df.dtypes.to_markdown()}\n\n"
-                            custom_clean_context += f"Missing Values:\n{current_df.isnull().sum()[current_df.isnull().sum() > 0].to_frame('Missing Count').to_markdown()}\n\n"
-                            custom_clean_context += f"Numerical Column Statistics:\n{current_df.select_dtypes(include=np.number).describe().to_markdown()}\n\n"
-                            custom_clean_context += f"Categorical Column Unique Counts & Top Values:\n"
-                            for col in current_df.select_dtypes(include=['object', 'category', 'bool']).columns:
-                                custom_clean_context += f"- {col}: Unique Count = {current_df[col].nunique()}, Top 5 values = {current_df[col].value_counts().head(5).index.tolist()}\n"
-                            custom_clean_context += f"\nFirst 5 rows:\n{current_df.head().to_markdown(index=False)}"
 
-                            custom_clean_system_instruction = (
-                                "You are an autonomous and highly capable data cleaning and preprocessing agent. "
-                                "Your goal is to thoroughly analyze the provided DataFrame summary and the user's cleaning instructions. "
-                                "Based on these, output a series of precise, executable data cleaning actions in JSON format. "
-                                "Prioritize actions that directly address the user's prompt, while also identifying and addressing other common data quality issues if relevant to the user's implied goal (e.g., preparing data for analysis/modeling). "
-                                "Output ONLY a JSON array of objects. Each object MUST have `column`, `action`, `reason`, and action-specific parameters. "
-                                "Valid actions are: `impute_missing`, `drop_rows_on_missing`, `drop_column`, `convert_type`, `normalize`.\n\n"
-                                "**JSON Schema for each action object:**\n"
-                                "{\n"
-                                "  \"column\": \"[Column Name]\",\n"
-                                "  \"action\": \"[impute_missing | drop_rows_on_missing | drop_column | convert_type | normalize]\",\n"
-                                "  \"reason\": \"[Brief explanation of why this action is taken]\",\n"
-                                "  \"method\": \"[mean | median | mode | constant]\", // Optional for impute_missing\n"
-                                "  \"value\": \"[Constant value]\", // Required if method is 'constant'\n"
-                                "  \"to_type\": \"[float | int | datetime | category]\", // Required for convert_type\n"
-                                "  \"format\": \"[Datetime format string, e.g., '%Y-%m-%d %H:%M:%S']\" // Optional for convert_type to datetime\n"
-                                "}\n\n"
-                                "Ensure your output is valid JSON and contains only the array of cleaning actions. No other text or explanation."
+                if st.button("Generate Code (Perplexity)", key="generate_custom_clean_code"):
+                    if user_cleaning_instruction:
+                        with st.spinner("Perplexity AI is generating transformation code..."):
+                            system_prompt = (
+                                "You are an expert Python data engineer. The user will provide instructions to clean or transform a pandas DataFrame. "
+                                "The DataFrame is available in a variable named `df`. "
+                                "Your task is to write a Python script that performs the requested transformations. "
+                                "The final transformed DataFrame must be assigned back to the `df` variable. "
+                                "ONLY output the Python code, without any explanation, comments, or markdown formatting."
                             )
-                            pplx_user_message = f"Here is the current state of the dataset:\n{custom_clean_context}\n\nMy cleaning instructions are: {user_cleaning_instruction_prompt}"
-                            pplx_raw_response = perplexity_chat(
-                                question=pplx_user_message, df=current_df, system_message=custom_clean_system_instruction
-                            )
-                            if isinstance(pplx_raw_response, str) and pplx_raw_response.startswith("❌"):
-                                st_error_dual(f"Perplexity AI cleaning failed: {pplx_raw_response}")
-                                st_info_dual("Please check your API key and network connection. Sometimes the model might return an error.")
-                                st.text_area("Raw AI Response (for debugging):", pplx_raw_response, height=200)
-                            else:
-                                try:
-                                    if isinstance(pplx_raw_response, str) and pplx_raw_response.strip().startswith("```json"):
-                                        pplx_raw_response = pplx_raw_response.strip()[7:-3].strip()
-                                    cleaning_actions = json.loads(pplx_raw_response)
-                                    if not isinstance(cleaning_actions, list):
-                                        st_error_dual("Perplexity AI returned an invalid structure. Expected a list of cleaning actions.")
-                                        st.text_area("Raw AI Response (for debugging):", pplx_raw_response, height=300)
-                                        st.stop()
-                                    actions_applied_count = 0
-                                    new_log_entries = []
-                                    for action in cleaning_actions:
-                                        st.session_state['processed_df_for_custom_clean'], applied = _apply_cleaning_action(
-                                            st.session_state['processed_df_for_custom_clean'].copy(), action, new_log_entries
-                                        )
-                                        if applied:
-                                            actions_applied_count += 1
-                                    st.session_state['llm_autoclean_log'].extend(new_log_entries)
-                                    if actions_applied_count > 0:
-                                        st.session_state['df_original'] = st.session_state['processed_df_for_custom_clean'].copy()
-                                        st_success_dual(f"Perplexity AI Custom Clean completed! Applied {actions_applied_count} cleaning steps.")
-                                    else:
-                                        st_info_dual("Perplexity AI Custom Clean completed, but no new cleaning steps were applied based on your instructions.")
-                                    st.rerun()
-                                except json.JSONDecodeError as e:
-                                    st_error_dual(f"Perplexity AI returned invalid JSON: {e}")
-                                    st.text_area("Raw AI Response (for debugging):", pplx_raw_response, height=300)
-                                except Exception as e:
-                                    st_error_dual(f"An error occurred during custom cleaning: {e}")
-                                    st.text_area("Raw AI Response (for debugging):", pplx_raw_response, height=300)
+                            generated_code = perplexity_chat(user_cleaning_instruction, df, system_message=system_prompt)
+                            
+                            # Clean up the code from markdown fences
+                            if isinstance(generated_code, str) and generated_code.strip().startswith("```python"):
+                                generated_code = generated_code.strip()[9:].strip()
+                                if generated_code.endswith("```"):
+                                    generated_code = generated_code[:-3].strip()
+                            st.session_state.custom_clean_code = generated_code
+                            st.session_state.custom_clean_result_df = None # Reset previous result
                     else:
-                        st_warning_dual("Please enter your cleaning instructions to proceed.")
+                        st.warning("Please provide instructions first.")
+                
+                if st.session_state.custom_clean_code:
+                    st.markdown("#### Generated Python Code (Review Carefully)")
+                    st.code(st.session_state.custom_clean_code, language="python")
 
-                st.markdown("---")
-                st.markdown("#### Cleaning Log:")
-                if st.session_state['llm_autoclean_log']:
-                    for entry in reversed(st.session_state['llm_autoclean_log']):
-                        st_write_dual(entry)
-                else:
-                    st_info_dual("No cleaning actions applied yet in this session.")
+                    if st.button("Execute Transformation", key="execute_custom_clean_code"):
+                        with st.spinner("Executing code..."):
+                            temp_df_for_exec = df.copy()
+                            local_scope = {'df': temp_df_for_exec, 'pd': pd, 'np': np}
+                            try:
+                                exec(st.session_state.custom_clean_code, globals(), local_scope)
+                                result_df = local_scope.get('df')
+                                st.session_state.custom_clean_result_df = result_df
+                                st.success("Transformation executed successfully!")
+                            except Exception as e:
+                                st.error(f"Execution failed: {e}")
+                                st.session_state.custom_clean_result_df = None
 
-                st.markdown("---")
-                st.markdown("#### Download Cleaned Data:")
-                if st.session_state['processed_df_for_custom_clean'] is not None and not st.session_state['processed_df_for_custom_clean'].empty:
-                    csv_output = io.StringIO()
-                    st.session_state['processed_df_for_custom_clean'].to_csv(csv_output, index=False)
-                    st.download_button(
-                        label="Download Cleaned Data as CSV",
-                        data=csv_output.getvalue(),
-                        file_name="cleaned_data.csv",
-                        mime="text/csv",
-                        key="download_cleaned_csv"
-                    )
-                    excel_output = io.BytesIO()
-                    st.session_state['processed_df_for_custom_clean'].to_excel(excel_output, index=False, engine='xlsxwriter')
-                    excel_output.seek(0)
-                    st.download_button(
-                        label="Download Cleaned Data as Excel",
-                        data=excel_output.getvalue(),
-                        file_name="cleaned_data.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key="download_cleaned_excel"
-                    )
-                else:
-                    st_warning_dual("No data to download yet. Please load and clean some data.")
+                if st.session_state.custom_clean_result_df is not None:
+                    st.markdown("---")
+                    st.markdown("#### Transformation Result Preview")
+                    st.dataframe(st.session_state.custom_clean_result_df.head())
+                    
+                    col1, col2 = st.columns([1,1])
+                    with col1:
+                        if st.button("✅ Commit Changes to Main Dataset", key="commit_custom_clean", use_container_width=True):
+                            st.session_state.df_original = st.session_state.custom_clean_result_df.copy()
+                            # Clear states to force refresh
+                            st.session_state.custom_clean_code = ""
+                            st.session_state.custom_clean_result_df = None
+                            st.success("Changes have been committed!")
+                            st.rerun()
+                    with col2:
+                        # Add download buttons
+                        csv_output = io.StringIO()
+                        st.session_state.custom_clean_result_df.to_csv(csv_output, index=False)
+                        st.download_button(
+                            label="📥 Download Result as CSV",
+                            data=csv_output.getvalue(),
+                            file_name="custom_cleaned_data.csv",
+                            mime="text/csv",
+                            key="download_custom_cleaned_csv",
+                            use_container_width=True
+                        )
+        # MODIFICATION END
 
         with tab4_sandbox:
             st.markdown("### 🧪 AI Sandbox Model")
@@ -1951,6 +2239,7 @@ def ai_analysis_view():
             2.  **Code Generation:** The AI will generate Python code to answer your question.
             3.  **Review & Execute:** You can review the code. When you execute, the AI will automatically attempt to fix any errors it encounters.
             4.  **Analysis & Follow-up:** The code's final output is sent back to the AI for an explanation. You can then ask follow-up questions.
+            5.  **Commit & Download:** If the code modifies the data, you can commit the changes to your main dataset or download the result.
             """)
             st.warning("""
             **⚠️ Security Warning:** The AI-generated code will be executed on the server running this app.
@@ -1961,9 +2250,10 @@ def ai_analysis_view():
             if df is not None and not df.empty:
                 sandbox_model_choice = st.radio(
                     "Choose AI Model for the Sandbox:",
-                    ("Google Gemini", "Perplexity AI", "mistral:latest"),
+                    ("Perplexity AI", "Google Gemini", "mistral:latest"),
                     key="sandbox_model_choice",
-                    horizontal=True
+                    horizontal=True,
+                    index=0 # Default to Perplexity
                 )
 
                 with st.form(key="sandbox_initial_query_form"):
@@ -1977,6 +2267,7 @@ def ai_analysis_view():
 
                 if generate_code_button and sandbox_query:
                     st.session_state.sandbox_conversation = []
+                    st.session_state.sandbox_result_df = None # Clear previous results
                     with st.spinner(f"AI ({sandbox_model_choice}) is generating Python code..."):
                         generated_code = ""
                         if sandbox_model_choice == "Perplexity AI":
@@ -2014,18 +2305,17 @@ def ai_analysis_view():
                             else:
                                 st_code_dual(turn["code"], language="python")
                                 if st.button("2. Execute Code and Get Explanation", key=f"execute_{i}"):
-                                    # The execute function now handles its own status UI
-                                    code_output, final_explanation, corrected_code = execute_and_explain_sandbox(
+                                    code_output, final_explanation, corrected_code, modified_df = execute_and_explain_sandbox(
                                         turn["query"], turn["code"], df, sandbox_model_choice
                                     )
                                     st.session_state.sandbox_conversation[i]["output"] = code_output
                                     st.session_state.sandbox_conversation[i]["explanation"] = final_explanation
                                     st.session_state.sandbox_conversation[i]["code"] = corrected_code
+                                    st.session_state.sandbox_result_df = modified_df
                                     st.rerun()
 
                         if turn["output"]:
                             st.markdown("#### Code Execution Output")
-                            # The execute function now creates its own status box, so we just show the final result here
                             if "An error occurred" in turn["output"] or "A syntax error was found" in turn["output"]:
                                 st_error_dual(turn["output"])
                             else:
@@ -2038,6 +2328,39 @@ def ai_analysis_view():
                             else:
                                 st_success_dual(f"Analysis for Question {i+1} Complete!")
                                 st_markdown_dual(turn["explanation"])
+                    
+                    # MODIFICATION START: Add commit and download options after execution
+                    if st.session_state.sandbox_result_df is not None:
+                        is_modified = not df.equals(st.session_state.sandbox_result_df)
+                        if is_modified:
+                            st.markdown("---")
+                            st.markdown("#### Data Transformation Options")
+                            st.info("The code execution resulted in changes to the data. You can preview, commit, or download the changes below.")
+                            st.markdown("##### Preview of Modified Data")
+                            st.dataframe(st.session_state.sandbox_result_df.head())
+                            
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                if st.button("✅ Commit Changes to Main Dataset", key="commit_sandbox_changes", use_container_width=True):
+                                    st.session_state.df_original = st.session_state.sandbox_result_df.copy()
+                                    st.session_state.sandbox_conversation = []
+                                    st.session_state.sandbox_result_df = None
+                                    st.success("Sandbox changes have been committed to the main dataset!")
+                                    st.rerun()
+                            with col2:
+                                csv_output_sandbox = io.StringIO()
+                                st.session_state.sandbox_result_df.to_csv(csv_output_sandbox, index=False)
+                                st.download_button(
+                                    label="📥 Download Modified Data as CSV",
+                                    data=csv_output_sandbox.getvalue(),
+                                    file_name="sandbox_modified_data.csv",
+                                    mime="text/csv",
+                                    key="download_sandbox_csv",
+                                    use_container_width=True
+                                )
+                        else:
+                            st.info("The last code execution did not result in any changes to the data.")
+                    # MODIFICATION END
 
                     last_turn_complete = st.session_state.sandbox_conversation and st.session_state.sandbox_conversation[-1]["explanation"]
                     if last_turn_complete:
@@ -2084,7 +2407,14 @@ def ai_analysis_view():
                                     final_explanation = perplexity_chat(
                                         question=followup_user_prompt, df=pd.DataFrame(), system_message=followup_system_prompt
                                     )
-                                
+                                elif sandbox_model_choice == "mistral:latest":
+                                    final_explanation = ollama_generic_chat(
+                                        question=followup_user_prompt,
+                                        context="",
+                                        model=OLLAMA_MISTRAL_MODEL,
+                                        system_message=followup_system_prompt
+                                    )
+
                                 st.session_state.sandbox_conversation.append({
                                     "query": follow_up_query,
                                     "code": None,
@@ -2120,7 +2450,6 @@ def smart_features_view():
                         aggfunc=agg_func
                     )
                     st_dataframe_dual(pivot_table)
-                    # MODIFIED: Removed the redundant pivot table summary block below.
                 except Exception as e:
                     st_error_dual(f"Error creating pivot table: {e}. Ensure selected columns are appropriate for the chosen aggregation function.")
             else:
@@ -2347,7 +2676,6 @@ def smart_features_view():
 
 # --- Main Application Router ---
 if st.session_state.get('df_original') is not None:
-    # Navigation Bar
     cols = st.columns((2, 1, 1, 1, 1, 1, 2))
     with cols[1]:
         if st.button("🏠 Home", use_container_width=True):
@@ -2358,12 +2686,12 @@ if st.session_state.get('df_original') is not None:
             st.session_state.page = 'data_profile'
             st.rerun()
     with cols[3]:
-        if st.button("📈 Visualise", use_container_width=True):
-            st.session_state.page = 'visualisation'
-            st.rerun()
-    with cols[4]:
         if st.button("🧠 AI Tools", use_container_width=True):
             st.session_state.page = 'ai_analysis'
+            st.rerun()
+    with cols[4]:
+        if st.button("📈 Visualise", use_container_width=True):
+            st.session_state.page = 'visualisation'
             st.rerun()
     with cols[5]:
         if st.button("🛠️ Features", use_container_width=True):
@@ -2371,22 +2699,20 @@ if st.session_state.get('df_original') is not None:
             st.rerun()
     st.markdown("<hr>", unsafe_allow_html=True)
 
-    # Page Router
     page = st.session_state.get('page', 'landing')
     if page == 'landing':
         landing_page_view()
     elif page == 'data_profile':
         data_profile_view()
-    elif page == 'visualisation':
-        visualisation_view()
     elif page == 'ai_analysis':
         ai_analysis_view()
+    elif page == 'visualisation':
+        visualisation_view()
     elif page == 'smart_features':
         smart_features_view()
     else:
         landing_page_view()
 else:
-    # Initial screen before data is loaded
     st.title("🚀 Welcome to DataSense AI")
     st.markdown("An advanced tool for Exploratory Data Analysis, AI-powered insights, and statistical testing.")
     st.info("Please use the 'Load Data' section in the sidebar to upload a CSV/Excel file or connect to a database to begin.")
