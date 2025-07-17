@@ -103,7 +103,7 @@ st.set_page_config(page_title="DataSense AI - Advanced Auto EDA", layout="wide")
 # IMPORTANT: Replace these with your actual API keys
 # MODIFIED: Changed the fake key to an empty string. The app will now correctly prompt you if the key is missing.
 GEMINI_API_KEY = "AIzaSyD21icfIXo9M8QUhYhq8kDuTbnDMvhN0Zc"  # Replace with your Gemini API key
-PPLX_API_KEY = "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" # Replace with your Perplexity API key
+PPLX_API_KEY = st.secrets["PPLX_API_KEY"] # Replace with your Perplexity API key
 
 # Ollama specific constants
 OLLAMA_BASE_URL = "http://localhost:11434"
