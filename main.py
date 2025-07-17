@@ -101,9 +101,8 @@ st.set_page_config(page_title="DataSense AI - Advanced Auto EDA", layout="wide")
 
 # --- API KEY PLACEHOLDERS ---
 # IMPORTANT: Replace these with your actual API keys
-# MODIFIED: Changed the fake key to an empty string. The app will now correctly prompt you if the key is missing.
-GEMINI_API_KEY = "AIzaSyD21icfIXo9M8QUhYhq8kDuTbnDMvhN0Zc"  # Replace with your Gemini API key
-PPLX_API_KEY = st.secrets["PPLX_API_KEY"] # Replace with your Perplexity API key
+GEMINI_API_KEY = "AIzaSyBrqgw5WuPDD-ht8gSnzmPVv3XuVC5nOSo"  # Replace with your Gemini API key
+PPLX_API_KEY = "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" # Replace with your Perplexity API key
 
 # Ollama specific constants
 OLLAMA_BASE_URL = "http://localhost:11434"
@@ -129,6 +128,7 @@ def init_session_state():
         'sandbox_result_df': None, # To store the modified df from the sandbox
         'custom_clean_code': "", # To store code from custom cleaning
         'custom_clean_result_df': None, # To store result from custom cleaning
+        'hypothesis_col_overrides': {}, # To store column type overrides for hypothesis tests
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -138,7 +138,8 @@ init_session_state()
 
 common_na_values = ["NA", "N/A", "", " ", "NULL", "null", "-", "?", "None", "nan", "NaN"]
 
-@st.cache_data
+# --- All Helper Functions (NO CACHING) ---
+
 def get_data_summary(df):
     summary_data = {}
     summary_data['shape_info'] = f"{df.shape[0]} rows, {df.shape[1]} columns"
@@ -164,10 +165,6 @@ def get_data_summary(df):
     summary_data['unique_values_df'] = pd.DataFrame(unique_values_data)
     return summary_data
 
-# --- All Helper Functions ---
-
-
-@st.cache_data
 def generate_ai_insights(df):
     insights = []
     missing = df.isnull().sum()
@@ -215,7 +212,7 @@ def generate_ai_insights(df):
         insights.append(f"⚠️ High cardinality: {', '.join(high_card_cols)}")
         insights.append("💡 Consider encoding or grouping.")
     return insights
-@st.cache_data(show_spinner=False)
+
 def perplexity_chat(question, df, prompt_type="all_rounder", system_message=None):
     if not PPLX_API_KEY or PPLX_API_KEY == "YOUR_PPLX_API_KEY":
         return "❌ Perplexity API Key is not set. Please replace 'YOUR_PPLX_API_KEY' with your actual key in the code."
@@ -316,7 +313,6 @@ Based on the provided context (either full data or summary), your job is to prov
     except Exception as e:
         return f"❌ An unexpected error occurred: {e}"
 
-@st.cache_data(show_spinner=False)
 def mistral_chat(question, context):
     prompt = (
         f"You are an expert data analyst with a deep understanding of datasets. "
@@ -345,7 +341,6 @@ def mistral_chat(question, context):
     except Exception as e:
         return f"An unexpected error occurred with Mistral: {e}"
 
-@st.cache_data(show_spinner=False)
 def ollama_generic_chat(question, context, model, system_message=None):
     if not LANGCHAIN_AVAILABLE:
         return "❌ LangChain is not installed. Please install it to use Ollama AI features."
@@ -354,11 +349,10 @@ def ollama_generic_chat(question, context, model, system_message=None):
         messages = []
         if system_message:
             messages.append({"role": "system", "content": system_message})
-        # If context is provided, prepend it to the question for the user role.
         if context:
             user_content = f"Here is the dataset context:\n{context}\n\nQuestion: {question}"
         else:
-            user_content = question # In some cases (like sandbox explanation), the prompt is self-contained.
+            user_content = question
         
         from langchain_core.messages import HumanMessage, SystemMessage
         langchain_messages = []
@@ -371,7 +365,6 @@ def ollama_generic_chat(question, context, model, system_message=None):
     except Exception as e:
         return f"❌ Error querying '{model}' via Ollama: {e}. Please ensure the model is downloaded (`ollama pull {model}`) and Ollama server is running at {OLLAMA_BASE_URL}."
 
-@st.cache_data(show_spinner=False)
 def llama3_chat(question, context):
     prompt = f"Dataset context:\n{context}\n\nQuestion: {question}\nAnswer:"
     try:
@@ -389,12 +382,9 @@ def llama3_chat(question, context):
     except Exception as e:
         return f"An unexpected error occurred with Llama 3.2: {e}"
 
-
-# MODIFIED: This function has been updated to correctly check for a missing API key.
-@st.cache_data(show_spinner=False)
 def chat_bot(messages, generation_config=None):
     API_KEY = GEMINI_API_KEY
-    if not API_KEY or API_KEY == "YOUR_GOOGLE_CLOUD_API_KEY":
+    if not API_KEY or API_KEY == "YOUR_GEMINI_API_KEY":
         return "❌ Google Gemini API Key is not set. Please add it to the script to use this feature."
     API_URL = f"https://generativelanguage.googleapis.com/v1alpha/models/gemini-1.5-flash:generateContent?key={API_KEY}"
     gemini_chat_history = []
@@ -407,7 +397,6 @@ def chat_bot(messages, generation_config=None):
         elif msg["role"] == "assistant":
             gemini_chat_history.append({"role": "model", "parts": [{"text": msg["content"]}]})
     if system_instruction and gemini_chat_history and gemini_chat_history[0]["role"] == "user":
-        # Prepend system instruction to the first user message
         gemini_chat_history[0]["parts"][0]["text"] = system_instruction + "\n\n" + gemini_chat_history[0]["parts"][0]["text"]
     payload = {
         "contents": gemini_chat_history,
@@ -674,7 +663,6 @@ def generate_python_for_sandbox_mistrallatest(query, df, correction_context=None
     generated_code = textwrap.dedent(generated_code).strip()
     return generated_code
 
-# MODIFICATION: This function now shows the AI's "thinking" process and returns the modified dataframe.
 def execute_and_explain_sandbox(query, generated_code, df, model_choice="Google Gemini"):
     """
     Executes AI-generated Python code, showing the AI's "thinking" process.
@@ -686,7 +674,7 @@ def execute_and_explain_sandbox(query, generated_code, df, model_choice="Google 
     current_code = generated_code
     code_output = ""
     final_explanation = ""
-    modified_df = df.copy() # Start with a copy
+    modified_df = df.copy() 
     
     st_status_container = st.status(f"🤖 AI is thinking... Processing your request: '{query}'", expanded=True)
 
@@ -701,14 +689,13 @@ def execute_and_explain_sandbox(query, generated_code, df, model_choice="Google 
                 st.write("▶️ **Thinking Step: Attempting to execute the following code...**")
                 st.code(current_code, language="python")
                 
-                # Execute the code
                 compile(current_code, '<string>', 'exec')
                 sys.stdout = redirected_output
-                local_scope = {'df': modified_df.copy(), 'pd': pd, 'np': np} # Use a copy of df
+                local_scope = {'df': modified_df.copy(), 'pd': pd, 'np': np} 
                 exec(current_code, globals(), local_scope)
-                sys.stdout = old_stdout # Restore stdout
+                sys.stdout = old_stdout 
                 
-                modified_df = local_scope.get('df', modified_df) # Get the modified df
+                modified_df = local_scope.get('df', modified_df) 
                 code_output = redirected_output.getvalue()
 
                 if not code_output:
@@ -718,10 +705,10 @@ def execute_and_explain_sandbox(query, generated_code, df, model_choice="Google 
                          code_output = "The script ran successfully but produced no printed output and did not modify the DataFrame."
 
                 st.success("✅ **Thinking Step Complete:** Code executed successfully!")
-                break # Exit loop on success
+                break 
             
             except Exception as e:
-                sys.stdout = old_stdout # Restore stdout
+                sys.stdout = old_stdout 
                 error_message = f"An error occurred during code execution:\n{e}\n\nCaptured output before error:\n{redirected_output.getvalue()}"
                 
                 st.error(f"Execution failed on attempt {attempt + 1}.")
@@ -743,7 +730,7 @@ def execute_and_explain_sandbox(query, generated_code, df, model_choice="Google 
                 elif model_choice == "Perplexity AI":
                     st.write(f"🤖 Asking Perplexity AI to fix the code...")
                     new_code = generate_python_for_sandbox_pplx(query, df, correction_context=correction_context)
-                else: # Google Gemini
+                else: 
                     st.write(f"🤖 Asking Google Gemini to fix the code...")
                     new_code = generate_python_for_sandbox(query, df, correction_context=correction_context)
 
@@ -764,7 +751,6 @@ def execute_and_explain_sandbox(query, generated_code, df, model_choice="Google 
             finally:
                 sys.stdout = old_stdout
 
-        # --- Explanation Generation ---
         st.write("🤖 **Thinking...** The code execution process is complete. I will now analyze the entire process to generate a final explanation of the outcome.")
         
         explanation_system_prompt = ""
@@ -911,23 +897,19 @@ st.markdown(f"""
 # --- Sidebar Controls ---
 st.sidebar.title("📊 Data Operations")
 
-# Caching functions for data loading
-@st.cache_data(show_spinner="Reading CSV...")
-def read_csv_cached(file):
+# --- Data Loading Functions (NO CACHING) ---
+def read_csv(file):
     return pd.read_csv(file, na_values=common_na_values)
 
-@st.cache_data(show_spinner="Reading Excel file...")
-def read_excel_cached(file_content, sheet_name=0):
+def read_excel(file_content, sheet_name=0):
     df = pd.read_excel(file_content, sheet_name=sheet_name)
     df.replace(common_na_values, np.nan, inplace=True)
     return df
 
-@st.cache_resource(show_spinner="Creating database engine...")
-def create_engine_cached(conn_string):
+def create_engine_uncached(conn_string):
     return create_engine(conn_string)
 
-@st.cache_data(show_spinner="Fetching data from database...")
-def read_sql_cached(query, _engine):
+def read_sql(query, _engine):
     return pd.read_sql(query, _engine)
 
 # 1. Load Data Expander
@@ -951,7 +933,7 @@ with st.sidebar.expander("📂 Load Data", expanded=True):
             for file in uploaded_files:
                 file_name = file.name.split('.')[0]
                 try:
-                    df_temp = pd.read_csv(file, na_values=common_na_values)
+                    df_temp = read_csv(file)
                     st.session_state['uploaded_dfs'][file_name] = df_temp
                 except Exception as e:
                     st_error_dual(f"Error loading {file.name}: {e}")
@@ -1016,8 +998,7 @@ with st.sidebar.expander("📂 Load Data", expanded=True):
                     if load_method == "Load ALL sheets (merge)":
                         all_sheets_dataframes = []
                         for sheet_name in sheet_names:
-                            df_sheet = pd.read_excel(file_content, sheet_name=sheet_name)
-                            df_sheet.replace(common_na_values, np.nan, inplace=True)
+                            df_sheet = read_excel(file_content, sheet_name=sheet_name)
                             all_sheets_dataframes.append(df_sheet)
                         merged_df_all_sheets = pd.concat(all_sheets_dataframes, ignore_index=True)
                         temp_uploaded_dfs[f"{file_name_base}_all_sheets"] = merged_df_all_sheets
@@ -1032,8 +1013,7 @@ with st.sidebar.expander("📂 Load Data", expanded=True):
                         if selected_sheets_for_merge:
                             specific_sheets_dataframes = []
                             for sheet_name_selected in selected_sheets_for_merge:
-                                df_sheet = pd.read_excel(file_content, sheet_name=sheet_name_selected)
-                                df_sheet.replace(common_na_values, np.nan, inplace=True)
+                                df_sheet = read_excel(file_content, sheet_name=sheet_name_selected)
                                 specific_sheets_dataframes.append(df_sheet)
                             merged_specific_sheets = pd.concat(specific_sheets_dataframes, ignore_index=True)
                             temp_uploaded_dfs[f"{file_name_base}_{'_'.join(selected_sheets_for_merge)}_merged"] = merged_specific_sheets
@@ -1049,8 +1029,7 @@ with st.sidebar.expander("📂 Load Data", expanded=True):
                                 key=f"sheet_selector_{file_name_base}_{i}"
                             )
                             st_info_dual(f"Loading sheet: '{selected_sheet}' from '{file_name_base}'.")
-                        df_temp = pd.read_excel(file_content, sheet_name=selected_sheet)
-                        df_temp.replace(common_na_values, np.nan, inplace=True)
+                        df_temp = read_excel(file_content, sheet_name=selected_sheet)
                         temp_uploaded_dfs[f"{file_name_base}_{selected_sheet}"] = df_temp
                 except Exception as e:
                     st_error_dual(f"Error loading {file.name}: {e}")
@@ -1129,8 +1108,8 @@ with st.sidebar.expander("📂 Load Data", expanded=True):
 
                     if conn_string:
                         with st.spinner("Connecting to database and fetching data..."):
-                            engine = create_engine(conn_string)
-                            fetched_df = pd.read_sql(query_text, engine)
+                            engine = create_engine_uncached(conn_string)
+                            fetched_df = read_sql(query_text, engine)
                             st.session_state['df_original'] = fetched_df
                             st.session_state['data_source'] = "database"
                             st_success_dual("Data fetched successfully from database!")
@@ -1147,7 +1126,6 @@ with st.sidebar.expander("📂 Load Data", expanded=True):
 
 
 # 2. Link DataFrames Expander
-# MODIFICATION START: Implemented the merge functionality
 if len(st.session_state.get('uploaded_dfs', {})) > 1:
     with st.sidebar.expander("🔗 Link DataFrames", expanded=False):
         df_names = list(st.session_state.uploaded_dfs.keys())
@@ -1181,24 +1159,21 @@ if len(st.session_state.get('uploaded_dfs', {})) > 1:
                             )
                             st.session_state['df_original'] = merged_df
                             st.session_state['data_source'] = "merged_df"
-                            st.session_state['uploaded_dfs'] = {'merged_df': merged_df} # Replace uploaded dfs with the new merged one
+                            st.session_state['uploaded_dfs'] = {'merged_df': merged_df} 
                             st_success_dual(f"DataFrames merged successfully! New shape: {merged_df.shape}")
                             st.session_state.page = 'landing'
-                            # Reset analysis to force re-calculation on the new dataframe
                             st.session_state.dataset_summary = None
                             st.session_state.data_metrics = None
                             st.rerun()
 
                     except Exception as e:
                         st_error_dual(f"Error merging DataFrames: {e}")
-# MODIFICATION END
 
-# MODIFICATION START: Added manual cleaning expander for missing values
+# 3. Manual Cleaning Expander
 with st.sidebar.expander("🧹 Manual Cleaning", expanded=False):
     if st.session_state.get('df_original') is not None:
         df_for_cleaning = st.session_state['df_original']
         
-        # Select column to clean
         cols_with_missing = df_for_cleaning.columns[df_for_cleaning.isnull().any()].tolist()
         if not cols_with_missing:
             st.info("No columns with missing values found in the current dataset.")
@@ -1210,12 +1185,10 @@ with st.sidebar.expander("🧹 Manual Cleaning", expanded=False):
             )
 
             if col_to_clean != "-":
-                # Display missing value info
                 missing_count = df_for_cleaning[col_to_clean].isnull().sum()
                 missing_percent = (missing_count / len(df_for_cleaning)) * 100
                 st.write(f"Missing values in **{col_to_clean}**: {missing_count} ({missing_percent:.2f}%)")
                 
-                # Choose cleaning action
                 action = st.radio(
                     "Choose an action:",
                     ["Impute Missing Values", "Drop Rows with Missing Values", "Drop Column"],
@@ -1246,7 +1219,7 @@ with st.sidebar.expander("🧹 Manual Cleaning", expanded=False):
                         
                         st.session_state['df_original'] = temp_df
                         st_success_dual(f"Imputed missing values in '{col_to_clean}' with {impute_method.lower()}.")
-                        st.session_state.dataset_summary = None # Force re-analysis
+                        st.session_state.dataset_summary = None 
                         st.rerun()
 
                 elif action == "Drop Rows with Missing Values":
@@ -1256,7 +1229,7 @@ with st.sidebar.expander("🧹 Manual Cleaning", expanded=False):
                         rows_after = len(temp_df)
                         st.session_state['df_original'] = temp_df
                         st_success_dual(f"Dropped {rows_before - rows_after} rows with missing values in '{col_to_clean}'.")
-                        st.session_state.dataset_summary = None # Force re-analysis
+                        st.session_state.dataset_summary = None
                         st.rerun()
 
                 elif action == "Drop Column":
@@ -1264,11 +1237,10 @@ with st.sidebar.expander("🧹 Manual Cleaning", expanded=False):
                         temp_df.drop(columns=[col_to_clean], inplace=True)
                         st.session_state['df_original'] = temp_df
                         st_success_dual(f"Dropped column '{col_to_clean}'.")
-                        st.session_state.dataset_summary = None # Force re-analysis
+                        st.session_state.dataset_summary = None
                         st.rerun()
     else:
         st.warning("Please load data to use cleaning features.")
-# MODIFICATION END
 
 # 4. Data Filtering Expander
 with st.sidebar.expander("🔍 Filter Data", expanded=False):
@@ -1301,23 +1273,27 @@ with st.sidebar.expander("🔍 Filter Data", expanded=False):
 df = None
 if st.session_state.get('df_original') is not None:
     df = st.session_state['df_original'].copy()
-    # Apply active filters
     if st.session_state.get('active_filters'):
         for col, value in st.session_state['active_filters'].items():
             if col in df.columns:
-                if pd.api.types.is_numeric_dtype(df[col]):
-                    df = df[(df[col] >= value[0]) & (df[col] <= value[1])]
-                elif pd.api.types.is_datetime64_any_dtype(df[col]):
-                    start_date, end_date = pd.to_datetime(value[0]), pd.to_datetime(value[1])
-                    df = df[(df[col] >= start_date) & (df[col] <= end_date)]
-                else:
-                    df = df[df[col].isin(value)]
+                try:
+                    if pd.api.types.is_numeric_dtype(df[col]):
+                        df = df[(df[col] >= value[0]) & (df[col] <= value[1])]
+                    elif pd.api.types.is_datetime64_any_dtype(df[col]):
+                        start_date, end_date = pd.to_datetime(value[0]), pd.to_datetime(value[1])
+                        df = df[(df[col] >= start_date) & (df[col] <= end_date)]
+                    else:
+                        df = df[df[col].isin(value)]
+                except Exception as e:
+                    st.error(f"Filter error on column '{col}': {e}. The filter for this column has been reset.")
+                    st.session_state['active_filters'].pop(col, None)
+                    st.rerun()
+
 
 if df is not None:
-    # Calculate metrics on the potentially filtered df EVERY time. This is fast.
-    calculate_and_store_data_metrics(df)
+    if st.session_state.get('data_metrics') is None:
+        calculate_and_store_data_metrics(df)
 
-    # Only generate the expensive AI summary ONCE.
     if st.session_state.get('dataset_summary') is None:
         generate_and_store_ai_summary(df)
         st.rerun()                 
@@ -1378,91 +1354,16 @@ def landing_page_view():
         st.info("Waiting for data analysis to complete...")
 
 def data_profile_view():
+    global df
+
     st.subheader("📄 Original Data Profile")
     if df is not None:
         st_dataframe_dual(df)
         st_markdown_dual("### Summary Statistics")
         summary_data = get_data_summary(df)
 
-        # MODIFICATION START: This version includes the critical state-resetting logic.
-        with st.expander("Change Column Data Type"):
-            df_for_conversion = st.session_state.get('df_original')
-
-            if df_for_conversion is not None:
-                all_cols = df_for_conversion.columns.tolist()
-                col_to_convert = st.selectbox(
-                    "Select a column to convert", 
-                    ["-"] + all_cols, 
-                    key="col_type_converter_select"
-                )
-
-                if col_to_convert != "-":
-                    st.write(f"Current data type of **{col_to_convert}** is `{df_for_conversion[col_to_convert].dtype}`")
-                    
-                    conversion_type = st.selectbox(
-                        "Convert to type:",
-                        ["-", "Numeric (Integer)", "Numeric (Float)", "Text/String (Object)", "Datetime", "Category", "Custom Map to Categorical"],
-                        key=f"convert_type_{col_to_convert}"
-                    )
-
-                    # --- This is the function that contains the definitive fix ---
-                    def apply_conversion_and_reset_state(temp_df):
-                        """Saves the converted dataframe and resets all dependent app states."""
-                        st.session_state['df_original'] = temp_df
-                        
-                        # CRITICAL FIX: Reset all states that depend on the old data types.
-                        st.session_state['active_filters'] = {}
-                        st.session_state['viz_filters'] = {}
-                        st.session_state['dataset_summary'] = None
-                        st.session_state['data_metrics'] = None
-                        
-                        st.success(f"Successfully converted '{col_to_convert}'.")
-                        st.warning("All filters and cached summaries have been reset to reflect the data change.")
-                        st.rerun()
-
-                    if conversion_type == "Custom Map to Categorical":
-                        st.info("Define a mapping from existing values to new categorical labels. Values not in the map will become 'Not a Number' (NaN).")
-                        unique_vals_to_map = df_for_conversion[col_to_convert].dropna().unique()
-
-                        if len(unique_vals_to_map) > 20:
-                            st.warning("Too many unique values (>20) for manual mapping.")
-                        else:
-                            map_dict = {}
-                            for val in unique_vals_to_map:
-                                map_dict[val] = st.text_input(f"Map '{val}' to:", key=f"map_{col_to_convert}_{val}")
-
-                            if st.button(f"Apply Custom Map to '{col_to_convert}'", key=f"apply_map_{col_to_convert}"):
-                                temp_df = st.session_state['df_original'].copy()
-                                final_map = {k: v for k, v in map_dict.items() if v}
-                                if not final_map:
-                                    st.error("Mapping cannot be empty.")
-                                else:
-                                    try:
-                                        temp_df[col_to_convert] = temp_df[col_to_convert].map(final_map).astype('category')
-                                        apply_conversion_and_reset_state(temp_df)
-                                    except Exception as e:
-                                        st.error(f"Failed to apply map: {e}")
-
-                    elif conversion_type != "-":
-                        if st.button(f"Apply Conversion to '{col_to_convert}'", key=f"apply_conversion_{col_to_convert}"):
-                            temp_df = st.session_state['df_original'].copy()
-                            try:
-                                if conversion_type == "Numeric (Integer)":
-                                    temp_df[col_to_convert] = pd.to_numeric(temp_df[col_to_convert], errors='coerce').astype('Int64')
-                                elif conversion_type == "Numeric (Float)":
-                                    temp_df[col_to_convert] = pd.to_numeric(temp_df[col_to_convert], errors='coerce').astype('float64')
-                                elif conversion_type == "Text/String (Object)":
-                                    temp_df[col_to_convert] = temp_df[col_to_convert].astype(str)
-                                elif conversion_type == "Datetime":
-                                    temp_df[col_to_convert] = pd.to_datetime(temp_df[col_to_convert], errors='coerce')
-                                elif conversion_type == "Category":
-                                    temp_df[col_to_convert] = temp_df[col_to_convert].astype('category')
-                                
-                                apply_conversion_and_reset_state(temp_df)
-                            except Exception as e:
-                                st.error(f"Conversion failed for '{col_to_convert}': {e}")
-        # MODIFICATION END
-
+        # FIX: Data type conversion section
+       
         with st.expander("Dataset Shape & Column Types", expanded=True):
             st_write_dual(summary_data['shape_info'])
             st_dataframe_dual(summary_data['column_types_df'], use_container_width=True)
@@ -1473,61 +1374,34 @@ def data_profile_view():
         with st.expander("Numeric Summary"):
             st_dataframe_dual(df.describe().transpose(), use_container_width=True)
         
+        # FIX: Using Perplexity AI for explanations
         with st.expander("Data Summary & AI-Powered Explanations", expanded=True):
             if df is not None and not df.empty:
-                summary_data_for_ai = get_data_summary(df)
-                context_for_ai = f"Dataset Shape: {df.shape[0]} rows, {df.shape[1]} columns\n\n"
-                context_for_ai += "Column Types:\n"
-                context_for_ai += summary_data_for_ai['column_types_df'].to_markdown(index=False) + "\n\n"
-
-                if not summary_data_for_ai['missing_values_df'].empty:
-                    context_for_ai += "Missing Values (Columns with >0 missing):\n"
-                    context_for_ai += summary_data_for_ai['missing_values_df'].to_markdown(index=False) + "\n\n"
-                else:
-                    context_for_ai += "No missing values.\n\n"
-
-                context_for_ai += "Unique Values per Column:\n"
-                context_for_ai += summary_data_for_ai['unique_values_df'].to_markdown(index=False) + "\n\n"
-
-                numeric_desc_for_ai = df.select_dtypes(include=np.number).describe().transpose()
-                if not numeric_desc_for_ai.empty:
-                    context_for_ai += "Numeric Summary:\n"
-                    context_for_ai += numeric_desc_for_ai.to_markdown() + "\n\n"
-                else:
-                    context_for_ai += "No numeric columns to summarize.\n\n"
-                
                 insights = generate_ai_insights(df)
 
                 for i, insight in enumerate(insights):
                     st.info(insight) 
-                    with st.expander("Why is this important? Click to ask AI..."):
-                        explanation_key = f"insight_explanation_{i}" 
-                        
-                        if explanation_key not in st.session_state:
-                            with st.spinner("🤖 Calling AI for a detailed explanation..."):
-                                system_prompt = (
-                                    "You are an expert data science instructor. A user is looking at an automated data quality insight. "
-                                    "Your task is to explain this insight in a clear, easy-to-understand manner. "
-                                    "Structure your response with markdown. Be concise but thorough."
-                                )
-                                user_prompt = (
-                                    f"My data analysis tool produced the following insight:\n\n"
-                                    f"**Insight:** \"{insight}\"\n\n"
-                                    f"**Here is a summary of my dataset for context:**\n"
-                                    f"```\n{context_for_ai}\n```\n\n"
-                                    f"Please explain this specific insight. In your explanation, cover these three points:\n"
-                                    f"1.  **What does this insight mean?** (e.g., Explain 'high cardinality' or 'data skewness').\n"
-                                    f"2.  **Why was this flagged for my specific data?** (Connect the concept to the column(s) mentioned in the insight).\n"
-                                    f"3.  **Why is the suggested action recommended?** (Explain what the proposed solution does and how it helps improve the data for analysis or modeling)."
-                                )
-                                messages = [
-                                    {"role": "system", "content": system_prompt},
-                                    {"role": "user", "content": user_prompt}
-                                ]
-                                explanation = chat_bot(messages)
-                                st.session_state[explanation_key] = explanation
-                        
-                        st.markdown(st.session_state[explanation_key])
+                    if st.button("Why is this important? Click to ask AI...", key=f"explain_insight_{i}"):
+                        with st.spinner("🤖 Calling Perplexity AI for a detailed explanation..."):
+                            summary_data_for_ai = get_data_summary(df)
+                            context_for_ai = f"Dataset Shape: {df.shape[0]} rows, {df.shape[1]} columns\n\n"
+                            context_for_ai += "Column Types:\n" + summary_data_for_ai['column_types_df'].to_markdown(index=False) + "\n\n"
+                            
+                            system_prompt = (
+                                "You are an expert data science instructor. A user is looking at an automated data quality insight. "
+                                "Your task is to explain this insight in a clear, easy-to-understand manner. "
+                                "Structure your response with markdown. Be concise but thorough."
+                            )
+                            user_prompt = (
+                                f"My data analysis tool produced the following insight:\n\n"
+                                f"**Insight:** \"{insight}\"\n\n"
+                                f"Please explain this specific insight. In your explanation, cover these three points:\n"
+                                f"1.  **What does this insight mean?** (e.g., Explain 'high cardinality' or 'data skewness').\n"
+                                f"2.  **Why was this flagged for my specific data?** (Connect the concept to the column(s) mentioned in the insight).\n"
+                                f"3.  **Why is the suggested action recommended?** (Explain what the proposed solution does and how it helps improve the data for analysis or modeling)."
+                            )
+                            explanation = perplexity_chat(question=user_prompt, df=df, system_message=system_prompt)
+                            st.markdown(explanation)
                     
                     st.markdown("---") 
             else:
@@ -1537,9 +1411,6 @@ def data_profile_view():
 
 
 def ask_ai_about_chart(chart_description, chart_title, df_context, key_suffix):
-    """
-    A reusable component to ask an AI model about a generated chart.
-    """
     st.markdown("---")
     st.markdown("#### 🤔 Ask AI about this Chart")
 
@@ -1922,17 +1793,58 @@ def visualisation_view():
 
             if "Correlation Heatmap" in selected_charts:
                 st.markdown("### Correlation Heatmap")
-                st.info("A correlation heatmap visually represents the correlation matrix between all numeric columns. It helps to quickly identify which variables are related.")
+                st.info("Visually explore the relationships between numeric variables. Use the options below to select columns and filter by correlation strength to keep the chart readable.")
                 if len(viz_numeric_cols) >= 2:
-                    corr_matrix = df_for_viz_filter[viz_numeric_cols].corr()
-                    fig_title = "Correlation Heatmap of Numeric Columns"
-                    fig_heatmap = px.imshow(corr_matrix, text_auto=True, aspect="auto", title=fig_title, color_continuous_scale=px.colors.sequential.Viridis)
-                    plotly_chart_dual(fig_heatmap, use_container_width=True)
-                    chart_desc = f"This is a correlation heatmap for the numeric columns in the dataset. It shows the Pearson correlation coefficient between each pair of variables. Values close to 1 or -1 indicate a strong linear relationship, while values close to 0 indicate a weak one."
-                    ask_ai_about_chart(chart_desc, fig_title, df_for_viz_filter, "corr_heatmap")
+                    
+                    # Let user select a subset of columns first
+                    cols_to_consider = st.multiselect(
+                        "Select columns to consider for correlation analysis:",
+                        options=viz_numeric_cols,
+                        default=viz_numeric_cols,
+                        key="heatmap_cols_to_consider"
+                    )
+
+                    if len(cols_to_consider) >= 2:
+                        # Add a slider for the correlation threshold
+                        corr_threshold = st.slider(
+                            "Show correlations with an absolute value greater than:",
+                            min_value=0.0,
+                            max_value=1.0,
+                            value=0.5, # Default to 0.5
+                            step=0.1,
+                            key="heatmap_threshold"
+                        )
+
+                        # Calculate the full matrix for the selected columns
+                        full_corr_matrix = df_for_viz_filter[cols_to_consider].corr()
+                        
+                        # Find variables that have at least one strong correlation
+                        high_corr_pairs = full_corr_matrix[abs(full_corr_matrix) > corr_threshold]
+                        cols_to_keep = high_corr_pairs.columns[(high_corr_pairs.count() > 1)].tolist() # >1 to exclude self-correlation
+
+                        if len(cols_to_keep) >= 2:
+                            final_corr_matrix = df_for_viz_filter[cols_to_keep].corr()
+
+                            fig_title = f"Correlation Heatmap (Absolute Correlation > {corr_threshold})"
+                            fig_height = max(400, len(cols_to_keep) * 35)
+
+                            fig_heatmap = px.imshow(
+                                final_corr_matrix, 
+                                text_auto=".2f", # Format to 2 decimal places
+                                aspect="auto", 
+                                title=fig_title, 
+                                color_continuous_scale='RdBu_r', # A diverging colormap is often better for correlation
+                                height=fig_height
+                            )
+                            plotly_chart_dual(fig_heatmap, use_container_width=True)
+                            chart_desc = f"This heatmap shows variables with at least one correlation stronger than {corr_threshold}."
+                            ask_ai_about_chart(chart_desc, fig_title, df_for_viz_filter, "corr_heatmap_filtered")
+                        else:
+                            st.info("No variables meet the selected correlation threshold. Try lowering the threshold value.")
+                    else:
+                        st.warning("Please select at least two numeric columns.")
                 else:
                     st_info_dual("Need at least two numeric columns to display a correlation heatmap.")
-
             if "Countplot" in selected_charts:
                 st.markdown("### Count Plot")
                 st.info("A count plot is like a histogram but for a categorical variable. It shows the number of occurrences of each category.")
@@ -1986,7 +1898,7 @@ def ai_analysis_view():
                 "Choose your AI Model:",
                 options=model_options,
                 key="ai_model_selector",
-                index=0 # Default to Perplexity AI
+                index=0 
             )
             st.markdown(f"**Selected Model:** `{ai_model_choice}`")
             
@@ -2041,7 +1953,7 @@ def ai_analysis_view():
                             
                         if answer_format == "Main Bullet Points":
                             format_instruction = "Please provide the answer in concise, main bullet points."
-                        else: # "Detailed Explanation"
+                        else: 
                             format_instruction = "Please provide a detailed and comprehensive answer."
 
                         final_question = f"{user_question}\n\n{format_instruction}"
@@ -2067,7 +1979,7 @@ def ai_analysis_view():
                     st_warning_dual("Please enter a question to get AI insights.")
             
         with tab4_2:
-            st.markdown("### ✨ AI Cleaning Suggestions (Powered by Gemini)")
+            st.markdown("### ✨ AI Cleaning Suggestions (Powered by Perplexity AI)")
             st.info("This feature uses AI to analyze your dataset and suggest data cleaning operations, such as handling missing values or correcting data types.")
             if df is not None and not df.empty:
                 auto_eda_context = f"Current Data Columns and Types:\n{df.dtypes.to_markdown()}\n\n"
@@ -2093,16 +2005,18 @@ def ai_analysis_view():
                     "4. Notes: Drop column (due to high sparsity > 90% missing)\n"
                     "5. Created_At: Convert to datetime (format '%Y-%m-%d %H:%M:%S')"
                 )
-                if st.button("Get Cleaning Suggestions (Gemini)", key="get_cleaning_suggestions_btn"):
+                if st.button("Get Cleaning Suggestions (Perplexity AI)", key="get_cleaning_suggestions_btn"):
                     with st.spinner("Analyzing data and generating cleaning suggestions..."):
                         llm_prompt = f"Please analyze this dataset and suggest cleaning steps:\n\n{auto_eda_context}"
-                        messages_for_cleaning = [
-                            {"role": "system", "content": auto_eda_system_instruction},
-                            {"role": "user", "content": llm_prompt}
-                        ]
-                        llm_response = chat_bot(messages_for_cleaning)
+                        # Swapped chat_bot (Gemini) with perplexity_chat
+                        llm_response = perplexity_chat(
+                            question=llm_prompt,
+                            df=df,
+                            system_message=auto_eda_system_instruction
+                        )
                         st.session_state['llm_eda_suggestions'] = []
                         parsed_suggestions = []
+                        # The parsing logic remains the same as it depends on the system prompt format
                         suggestion_pattern = re.compile(r"^\d+\.\s*(?P<column>[^:]+):\s*(?P<action>[^\(]+)\s*\((?P<details>[^\)]+)\)", re.MULTILINE)
                         for line in llm_response.split('\n'):
                             match = suggestion_pattern.match(line.strip())
@@ -2142,8 +2056,8 @@ def ai_analysis_view():
                             st_info_dual("No new cleaning steps were applied or selected.")
             else:
                 st_info_dual("Please upload data to get AI cleaning suggestions.")
+            # --- MODIFICATION END ---
         
-        # MODIFICATION START: Rewritten Custom AI Data Preparation section
         with tab4_3:
             st.markdown("### 🤖 Custom AI Data Preparation (Powered by Perplexity AI)")
             st.info("""
@@ -2176,13 +2090,12 @@ def ai_analysis_view():
                             )
                             generated_code = perplexity_chat(user_cleaning_instruction, df, system_message=system_prompt)
                             
-                            # Clean up the code from markdown fences
                             if isinstance(generated_code, str) and generated_code.strip().startswith("```python"):
                                 generated_code = generated_code.strip()[9:].strip()
                                 if generated_code.endswith("```"):
                                     generated_code = generated_code[:-3].strip()
                             st.session_state.custom_clean_code = generated_code
-                            st.session_state.custom_clean_result_df = None # Reset previous result
+                            st.session_state.custom_clean_result_df = None 
                     else:
                         st.warning("Please provide instructions first.")
                 
@@ -2212,13 +2125,11 @@ def ai_analysis_view():
                     with col1:
                         if st.button("✅ Commit Changes to Main Dataset", key="commit_custom_clean", use_container_width=True):
                             st.session_state.df_original = st.session_state.custom_clean_result_df.copy()
-                            # Clear states to force refresh
                             st.session_state.custom_clean_code = ""
                             st.session_state.custom_clean_result_df = None
                             st.success("Changes have been committed!")
                             st.rerun()
                     with col2:
-                        # Add download buttons
                         csv_output = io.StringIO()
                         st.session_state.custom_clean_result_df.to_csv(csv_output, index=False)
                         st.download_button(
@@ -2229,7 +2140,6 @@ def ai_analysis_view():
                             key="download_custom_cleaned_csv",
                             use_container_width=True
                         )
-        # MODIFICATION END
 
         with tab4_sandbox:
             st.markdown("### 🧪 AI Sandbox Model")
@@ -2253,7 +2163,7 @@ def ai_analysis_view():
                     ("Perplexity AI", "Google Gemini", "mistral:latest"),
                     key="sandbox_model_choice",
                     horizontal=True,
-                    index=0 # Default to Perplexity
+                    index=0
                 )
 
                 with st.form(key="sandbox_initial_query_form"):
@@ -2267,14 +2177,14 @@ def ai_analysis_view():
 
                 if generate_code_button and sandbox_query:
                     st.session_state.sandbox_conversation = []
-                    st.session_state.sandbox_result_df = None # Clear previous results
+                    st.session_state.sandbox_result_df = None 
                     with st.spinner(f"AI ({sandbox_model_choice}) is generating Python code..."):
                         generated_code = ""
                         if sandbox_model_choice == "Perplexity AI":
                             generated_code = generate_python_for_sandbox_pplx(sandbox_query, df)
                         elif sandbox_model_choice == "mistral:latest":
                             generated_code = generate_python_for_sandbox_mistrallatest(sandbox_query, df)
-                        else: # Google Gemini
+                        else: 
                             generated_code = generate_python_for_sandbox(sandbox_query, df)
 
                         if generated_code:
@@ -2329,7 +2239,6 @@ def ai_analysis_view():
                                 st_success_dual(f"Analysis for Question {i+1} Complete!")
                                 st_markdown_dual(turn["explanation"])
                     
-                    # MODIFICATION START: Add commit and download options after execution
                     if st.session_state.sandbox_result_df is not None:
                         is_modified = not df.equals(st.session_state.sandbox_result_df)
                         if is_modified:
@@ -2360,7 +2269,6 @@ def ai_analysis_view():
                                 )
                         else:
                             st.info("The last code execution did not result in any changes to the data.")
-                    # MODIFICATION END
 
                     last_turn_complete = st.session_state.sandbox_conversation and st.session_state.sandbox_conversation[-1]["explanation"]
                     if last_turn_complete:
@@ -2460,13 +2368,77 @@ def smart_features_view():
     with hypothesis_tab:
         st.subheader("🔬 Hypothesis Testing with Full Explanation")
         if df is not None and not df.empty:
+            
+            # MODIFICATION START: Added column type override feature
+            with st.expander("⚙️ Advanced: Override Column Types for Testing"):
+                st.info("Use this if a column is numeric but represents categories (e.g., a target column with 0/1 for No/Yes), or vice-versa. The changes only apply to this tab.")
+                
+                col_to_override = st.selectbox(
+                    "Select a column to treat differently:",
+                    ["-"] + df.columns.tolist(),
+                    key="override_col_select"
+                )
+                
+                if col_to_override != "-":
+                    base_numeric_cols_check = df.select_dtypes(include=np.number).columns.tolist()
+                    current_type = 'Numeric' if col_to_override in base_numeric_cols_check else 'Categorical'
+                    st.write(f"'{col_to_override}' is currently detected as: **{current_type}**")
+                    
+                    override_as = st.radio(
+                        f"Treat '{col_to_override}' as:",
+                        ("Numeric", "Categorical"),
+                        key=f"override_as_{col_to_override}",
+                        horizontal=True
+                    )
+                    
+                    if st.button(f"Apply Override for '{col_to_override}'", key=f"apply_override_{col_to_override}"):
+                        st.session_state.hypothesis_col_overrides[col_to_override] = override_as
+                        st.success(f"Applied override: '{col_to_override}' will now be treated as '{override_as}'.")
+                        st.rerun()
+
+                if st.session_state.hypothesis_col_overrides:
+                    st.markdown("---")
+                    st.markdown("**Current Overrides:**")
+                    overrides_df = pd.DataFrame(
+                        st.session_state.hypothesis_col_overrides.items(),
+                        columns=['Column', 'Treated As']
+                    )
+                    st_dataframe_dual(overrides_df, hide_index=True)
+                    if st.button("Clear All Overrides"):
+                        st.session_state.hypothesis_col_overrides = {}
+                        st.rerun()
+
+            # Get base types
+            base_numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+            base_categorical_cols = df.select_dtypes(include=['object', 'category', 'bool']).columns.tolist()
+
+            # Apply overrides
+            numeric_cols = list(base_numeric_cols)
+            categorical_cols = list(base_categorical_cols)
+            overrides = st.session_state.get('hypothesis_col_overrides', {})
+
+            for col, treat_as in overrides.items():
+                if treat_as == 'Numeric':
+                    if col in categorical_cols:
+                        categorical_cols.remove(col)
+                    if col not in numeric_cols:
+                        numeric_cols.append(col)
+                elif treat_as == 'Categorical':
+                    if col in numeric_cols:
+                        numeric_cols.remove(col)
+                    if col not in categorical_cols:
+                        categorical_cols.append(col)
+            
+            numeric_cols.sort()
+            categorical_cols.sort()
+            st.markdown("---")
+            # MODIFICATION END
+
             test_type = st.selectbox(
                 "Select Hypothesis Test",
                 ["Select a Test", "One-Sample T-Test", "Two-Sample T-Test", "ANOVA", "Chi-Squared Test", "Correlation Test", "Linear Regression"],
                 key="hypothesis_test_type"
             )
-            numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
-            categorical_cols = df.select_dtypes(include=['object', 'category', 'bool']).columns.tolist()
 
             def show_explanation(title, description, null_hypothesis_text, alt_hypothesis_text):
                 st_markdown_dual(f"### ❓ What is {title}?")
