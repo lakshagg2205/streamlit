@@ -102,7 +102,7 @@ st.set_page_config(page_title="DataSense AI - Advanced Auto EDA", layout="wide")
 # --- API KEY PLACEHOLDERS ---
 # IMPORTANT: Replace these with your actual API keys
 GEMINI_API_KEY = "AIzaSyBrqgw5WuPDD-ht8gSnzmPVv3XuVC5nOSo"  # Replace with your Gemini API key
-PPLX_API_KEY = "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" # Replace with your Perplexity API key
+PPLX_API_KEY = "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" # Replace with your Perplexity API key
 
 # Ollama specific constants
 OLLAMA_BASE_URL = "http://localhost:11434"
